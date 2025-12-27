@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-FROM golang:1.24.6
+FROM registry.cn-hangzhou.aliyuncs.com/hexiaoshi/golang:1.24.6
 
 WORKDIR /go/src/sigs.k8s.io/descheduler
 COPY . .
