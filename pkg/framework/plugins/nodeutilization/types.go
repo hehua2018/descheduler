@@ -47,6 +47,10 @@ type LowNodeUtilizationArgs struct {
 	// but then filtered out before eviction
 	EvictableNamespaces *api.Namespaces `json:"evictableNamespaces,omitempty"`
 
+	// UseActualUsage determines whether to use actual resource usage from metrics
+	// or just use resource requests for calculating node utilization.
+	// Default is false (use requests).
+	UseActualUsage bool `json:"useActualUsage,omitempty"`
 	// evictionLimits limits the number of evictions per domain. E.g. node, namespace, total.
 	EvictionLimits *api.EvictionLimits `json:"evictionLimits,omitempty"`
 }

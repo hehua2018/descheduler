@@ -106,9 +106,30 @@ func NewLowNodeUtilization(
 	// different way provides its own "usageClient". here we make sure we
 	// have the correct one or an error is triggered. XXX MetricsServer is
 	// deprecated, removed once dropped.
-	var usageClient usageClient = newRequestedUsageClient(
-		extendedResourceNames, handle.GetPodsAssignedToNodeFunc(),
-	)
+	// var usageClient usageClient = newRequestedUsageClient(
+	// 	extendedResourceNames, handle.GetPodsAssignedToNodeFunc(),
+	// )
+
+	metricsCollector := handle.MetricsCollector()
+	if metricsCollector == nil && args.UseActualUsage {
+		return nil, fmt.Errorf("metrics collector is not available but UseActualUsage is set to true")
+	}
+
+	var usageClient usageClient
+	if args.UseActualUsage {
+		usageClient = newActualUsageClient(
+			resourceNames,
+			handle.GetPodsAssignedToNodeFunc(),
+			metricsCollector,
+		)
+	} else {
+		usageClient = newRequestedUsageClient(
+			resourceNames,
+			handle.GetPodsAssignedToNodeFunc(),
+		)
+	}
+
+
 	if metrics != nil {
 		usageClient, err = usageClientForMetrics(args, handle, extendedResourceNames)
 		if err != nil {
