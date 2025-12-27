@@ -67,6 +67,11 @@ type HighNodeUtilizationArgs struct {
 	// thresholds.
 	EvictionModes []EvictionMode `json:"evictionModes,omitempty"`
 
+	// UseActualUsage determines whether to use actual resource usage from metrics
+	// or just use resource requests for calculating node utilization.
+	// Default is false (use requests).
+	UseActualUsage bool `json:"useActualUsage,omitempty"`
+
 	// Naming this one differently since namespaces are still
 	// considered while considering resources used by pods
 	// but then filtered out before eviction

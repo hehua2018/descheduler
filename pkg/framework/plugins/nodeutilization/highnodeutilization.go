@@ -41,8 +41,9 @@ const HighNodeUtilizationPluginName = "HighNodeUtilization"
 var _ frameworktypes.BalancePlugin = &HighNodeUtilization{}
 
 // HighNodeUtilization evicts pods from under utilized nodes so that scheduler
-// can schedule according to its plugin. Note that CPU/Memory requests are used
-// to calculate nodes' utilization and not the actual resource usage.
+// can schedule according to its plugin. The plugin can use either actual resource
+// usage from metrics API or resource requests for calculating nodes' utilization,
+// depending on the UseActualUsage parameter.
 type HighNodeUtilization struct {
 	logger         klog.Logger
 	handle         frameworktypes.Handle
@@ -116,8 +117,23 @@ func NewHighNodeUtilization(
 
 	// Use actual usage client to get real resource usage from metrics API
 	metricsCollector := handle.MetricsCollector()
-	if metricsCollector == nil {
-		return nil, fmt.Errorf("metrics collector is not available")
+	if metricsCollector == nil && args.UseActualUsage {
+		return nil, fmt.Errorf("metrics collector is not available but UseActualUsage is set to true")
+	}
+
+	// Choose usage client based on UseActualUsage parameter
+	var usageClient usageClient
+	if args.UseActualUsage {
+		usageClient = newActualUsageClient(
+			resourceNames,
+			handle.GetPodsAssignedToNodeFunc(),
+			metricsCollector,
+		)
+	} else {
+		usageClient = newRequestedUsageClient(
+			resourceNames,
+			handle.GetPodsAssignedToNodeFunc(),
+		)
 	}
 
 	return &HighNodeUtilization{
@@ -128,11 +144,7 @@ func NewHighNodeUtilization(
 		highThresholds: highThresholds,
 		criteria:       thresholdsToKeysAndValues(args.Thresholds),
 		podFilter:      podFilter,
-		usageClient: newActualUsageClient(
-			resourceNames,
-			handle.GetPodsAssignedToNodeFunc(),
-			metricsCollector,
-		),
+		usageClient:    usageClient,
 	}, nil
 }
 
