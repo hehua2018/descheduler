@@ -39,3 +39,26 @@ This project publishes releases according to the Go language guidelines for
 [developing and publishing modules][pub].
 
 [pub]: https://go.dev/doc/modules/developing
+
+package nodeutilization
+
+import (
+    "context"
+    v1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
+    "k8s.io/client-go/kubernetes"
+    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// NodeMetricsClient 接口定义
+type NodeMetricsClient interface {
+    GetNodeMetrics(nodeName string) (*v1beta1.NodeMetrics, error)
+}
+
+// MetricsClient 实现
+type MetricsClient struct {
+    clientset *kubernetes.Interface
+}
+
+func (m *MetricsClient) GetNodeMetrics(nodeName string) (*v1beta1.NodeMetrics, error) {
+    return m.clientset.MetricsV1beta1().NodeMetricses().Get(context.TODO(), nodeName, metav1.GetOptions{})
+}

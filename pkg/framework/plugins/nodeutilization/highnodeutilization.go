@@ -114,6 +114,12 @@ func NewHighNodeUtilization(
 		),
 	)
 
+	// Use actual usage client to get real resource usage from metrics API
+	metricsCollector := handle.MetricsCollector()
+	if metricsCollector == nil {
+		return nil, fmt.Errorf("metrics collector is not available")
+	}
+
 	return &HighNodeUtilization{
 		logger:         logger,
 		handle:         handle,
@@ -122,9 +128,10 @@ func NewHighNodeUtilization(
 		highThresholds: highThresholds,
 		criteria:       thresholdsToKeysAndValues(args.Thresholds),
 		podFilter:      podFilter,
-		usageClient: newRequestedUsageClient(
+		usageClient: newActualUsageClient(
 			resourceNames,
 			handle.GetPodsAssignedToNodeFunc(),
+			metricsCollector,
 		),
 	}, nil
 }
