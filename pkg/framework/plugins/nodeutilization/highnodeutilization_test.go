@@ -23,14 +23,18 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	policy "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/events"
 
 	"sigs.k8s.io/descheduler/pkg/api"
 	"sigs.k8s.io/descheduler/pkg/descheduler/evictions"
+	podutil "sigs.k8s.io/descheduler/pkg/descheduler/pod"
+	frameworkfake "sigs.k8s.io/descheduler/pkg/framework/fake"
 	"sigs.k8s.io/descheduler/pkg/framework/plugins/defaultevictor"
-	frameworktesting "sigs.k8s.io/descheduler/pkg/framework/testing"
 	frameworktypes "sigs.k8s.io/descheduler/pkg/framework/types"
 	"sigs.k8s.io/descheduler/pkg/utils"
 	"sigs.k8s.io/descheduler/test"
@@ -47,7 +51,6 @@ func TestHighNodeUtilization(t *testing.T) {
 	testCases := []struct {
 		name                string
 		thresholds          api.ResourceThresholds
-		evictionModes       []EvictionMode
 		nodes               []*v1.Node
 		pods                []*v1.Pod
 		expectedPodsEvicted uint
@@ -96,15 +99,25 @@ func TestHighNodeUtilization(t *testing.T) {
 				test.BuildTestPod("p1", 400, 0, n1NodeName, func(pod *v1.Pod) {
 					// A pod with local storage.
 					test.SetNormalOwnerRef(pod)
-					test.SetHostPathEmptyDirVolumeSource(pod)
+					pod.Spec.Volumes = []v1.Volume{
+						{
+							Name: "sample",
+							VolumeSource: v1.VolumeSource{
+								HostPath: &v1.HostPathVolumeSource{Path: "somePath"},
+								EmptyDir: &v1.EmptyDirVolumeSource{
+									SizeLimit: resource.NewQuantity(int64(10), resource.BinarySI),
+								},
+							},
+						},
+					}
 					// A Mirror Pod.
 					pod.Annotations = test.GetMirrorPodAnnotation()
 				}),
 				test.BuildTestPod("p2", 400, 0, n1NodeName, func(pod *v1.Pod) {
 					// A Critical Pod.
-					test.SetNormalOwnerRef(pod)
 					pod.Namespace = "kube-system"
-					test.SetPodPriority(pod, utils.SystemCriticalPriority)
+					priority := utils.SystemCriticalPriority
+					pod.Spec.Priority = &priority
 				}),
 				// These won't be evicted.
 				test.BuildTestPod("p3", 400, 0, n2NodeName, test.SetDSOwnerRef),
@@ -154,9 +167,9 @@ func TestHighNodeUtilization(t *testing.T) {
 				// These won't be evicted.
 				test.BuildTestPod("p2", 400, 0, n1NodeName, func(pod *v1.Pod) {
 					// A Critical Pod.
-					test.SetNormalOwnerRef(pod)
 					pod.Namespace = "kube-system"
-					test.SetPodPriority(pod, utils.SystemCriticalPriority)
+					priority := utils.SystemCriticalPriority
+					pod.Spec.Priority = &priority
 				}),
 				// These won't be evicted.
 				test.BuildTestPod("p3", 400, 0, n2NodeName, test.SetRSOwnerRef),
@@ -232,11 +245,13 @@ func TestHighNodeUtilization(t *testing.T) {
 			},
 			// All pods are assumed to be burstable (test.BuildTestNode always sets both cpu/memory resource requests to some value)
 			pods: []*v1.Pod{
-				test.BuildTestPod("p1", 0, 0, n1NodeName, func(pod *v1.Pod) {
+				test.BuildTestPod("p1", 400, 0, n1NodeName, func(pod *v1.Pod) {
 					test.SetRSOwnerRef(pod)
 					test.MakeBestEffortPod(pod)
 				}),
-				test.BuildTestPod("p2", 400, 0, n1NodeName, test.SetRSOwnerRef),
+				test.BuildTestPod("p2", 400, 0, n1NodeName, func(pod *v1.Pod) {
+					test.SetRSOwnerRef(pod)
+				}),
 				// These won't be evicted.
 				test.BuildTestPod("p3", 400, 0, n2NodeName, test.SetRSOwnerRef),
 				test.BuildTestPod("p4", 400, 0, n2NodeName, test.SetRSOwnerRef),
@@ -419,51 +434,6 @@ func TestHighNodeUtilization(t *testing.T) {
 			},
 			expectedPodsEvicted: 0,
 		},
-		{
-			name: "with extended resource threshold and no extended resource pods",
-			thresholds: api.ResourceThresholds{
-				extendedResource: 40,
-			},
-			evictionModes: []EvictionMode{EvictionModeOnlyThresholdingResources},
-			nodes: []*v1.Node{
-				test.BuildTestNode(n1NodeName, 4000, 3000, 10, func(node *v1.Node) {
-					test.SetNodeExtendedResource(node, extendedResource, 10)
-				}),
-				test.BuildTestNode(n2NodeName, 4000, 3000, 10, func(node *v1.Node) {
-					test.SetNodeExtendedResource(node, extendedResource, 10)
-				}),
-				test.BuildTestNode(n3NodeName, 4000, 3000, 10, func(node *v1.Node) {
-					test.SetNodeExtendedResource(node, extendedResource, 10)
-				}),
-			},
-			pods: []*v1.Pod{
-				// pods on node1 have the extended resource
-				// request set and they put the node in the
-				// over utilization range.
-				test.BuildTestPod("p1", 100, 0, n1NodeName, func(pod *v1.Pod) {
-					test.SetRSOwnerRef(pod)
-					test.SetPodExtendedResourceRequest(pod, extendedResource, 3)
-				}),
-				test.BuildTestPod("p2", 100, 0, n1NodeName, func(pod *v1.Pod) {
-					test.SetRSOwnerRef(pod)
-					test.SetPodExtendedResourceRequest(pod, extendedResource, 3)
-				}),
-				// pods in the other nodes must not be evicted
-				// because they do not have the extended
-				// resource defined in their requests.
-				test.BuildTestPod("p3", 500, 0, n2NodeName, test.SetRSOwnerRef),
-				test.BuildTestPod("p4", 500, 0, n2NodeName, func(pod *v1.Pod) {
-					test.SetRSOwnerRef(pod)
-				}),
-				test.BuildTestPod("p5", 500, 0, n2NodeName, func(pod *v1.Pod) {
-					test.SetRSOwnerRef(pod)
-				}),
-				test.BuildTestPod("p6", 500, 0, n2NodeName, func(pod *v1.Pod) {
-					test.SetRSOwnerRef(pod)
-				}),
-			},
-			expectedPodsEvicted: 0,
-		},
 	}
 
 	for _, testCase := range testCases {
@@ -478,15 +448,19 @@ func TestHighNodeUtilization(t *testing.T) {
 			for _, pod := range testCase.pods {
 				objs = append(objs, pod)
 			}
+			fakeClient := fake.NewSimpleClientset(objs...)
+
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
+			podInformer := sharedInformerFactory.Core().V1().Pods().Informer()
+
+			getPodsAssignedToNode, err := podutil.BuildGetPodsAssignedToNodeFunc(podInformer)
+			if err != nil {
+				t.Errorf("Build get pods assigned to node function error: %v", err)
+			}
+
 			podsForEviction := make(map[string]struct{})
 			for _, pod := range testCase.evictedPods {
 				podsForEviction[pod] = struct{}{}
-			}
-			fakeClient := fake.NewSimpleClientset(objs...)
-
-			handle, podEvictor, err := frameworktesting.InitFrameworkHandle(ctx, fakeClient, nil, defaultevictor.DefaultEvictorArgs{NodeFit: true}, nil)
-			if err != nil {
-				t.Fatalf("Unable to initialize a framework handle: %v", err)
 			}
 
 			evictionFailed := false
@@ -505,14 +479,54 @@ func TestHighNodeUtilization(t *testing.T) {
 				})
 			}
 
-			plugin, err := NewHighNodeUtilization(
-				ctx,
-				&HighNodeUtilizationArgs{
-					Thresholds:    testCase.thresholds,
-					EvictionModes: testCase.evictionModes,
-				},
-				handle,
+			sharedInformerFactory.Start(ctx.Done())
+			sharedInformerFactory.WaitForCacheSync(ctx.Done())
+
+			eventRecorder := &events.FakeRecorder{}
+
+			podEvictor := evictions.NewPodEvictor(
+				fakeClient,
+				"v1",
+				false,
+				nil,
+				nil,
+				testCase.nodes,
+				false,
+				eventRecorder,
 			)
+
+			defaultevictorArgs := &defaultevictor.DefaultEvictorArgs{
+				EvictLocalStoragePods:   false,
+				EvictSystemCriticalPods: false,
+				IgnorePvcPods:           false,
+				EvictFailedBarePods:     false,
+				NodeFit:                 true,
+			}
+
+			evictorFilter, err := defaultevictor.New(
+				defaultevictorArgs,
+				&frameworkfake.HandleImpl{
+					ClientsetImpl:                 fakeClient,
+					GetPodsAssignedToNodeFuncImpl: getPodsAssignedToNode,
+					SharedInformerFactoryImpl:     sharedInformerFactory,
+				},
+			)
+			if err != nil {
+				t.Fatalf("Unable to initialize the plugin: %v", err)
+			}
+
+			handle := &frameworkfake.HandleImpl{
+				ClientsetImpl:                 fakeClient,
+				GetPodsAssignedToNodeFuncImpl: getPodsAssignedToNode,
+				PodEvictorImpl:                podEvictor,
+				EvictorFilterImpl:             evictorFilter.(frameworktypes.EvictorPlugin),
+				SharedInformerFactoryImpl:     sharedInformerFactory,
+			}
+
+			plugin, err := NewHighNodeUtilization(&HighNodeUtilizationArgs{
+				Thresholds: testCase.thresholds,
+			},
+				handle)
 			if err != nil {
 				t.Fatalf("Unable to initialize the plugin: %v", err)
 			}
@@ -609,19 +623,58 @@ func TestHighNodeUtilizationWithTaints(t *testing.T) {
 			}
 
 			fakeClient := fake.NewSimpleClientset(objs...)
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
+			podInformer := sharedInformerFactory.Core().V1().Pods().Informer()
 
-			handle, podEvictor, err := frameworktesting.InitFrameworkHandle(
-				ctx,
-				fakeClient,
-				evictions.NewOptions().WithMaxPodsToEvictPerNode(&item.evictionsExpected),
-				defaultevictor.DefaultEvictorArgs{},
-				nil,
-			)
+			getPodsAssignedToNode, err := podutil.BuildGetPodsAssignedToNodeFunc(podInformer)
 			if err != nil {
-				t.Fatalf("Unable to initialize a framework handle: %v", err)
+				t.Errorf("Build get pods assigned to node function error: %v", err)
 			}
 
-			plugin, err := NewHighNodeUtilization(ctx, &HighNodeUtilizationArgs{
+			sharedInformerFactory.Start(ctx.Done())
+			sharedInformerFactory.WaitForCacheSync(ctx.Done())
+
+			eventRecorder := &events.FakeRecorder{}
+
+			podEvictor := evictions.NewPodEvictor(
+				fakeClient,
+				"policy/v1",
+				false,
+				&item.evictionsExpected,
+				nil,
+				item.nodes,
+				false,
+				eventRecorder,
+			)
+
+			defaultevictorArgs := &defaultevictor.DefaultEvictorArgs{
+				EvictLocalStoragePods:   false,
+				EvictSystemCriticalPods: false,
+				IgnorePvcPods:           false,
+				EvictFailedBarePods:     false,
+			}
+
+			evictorFilter, err := defaultevictor.New(
+				defaultevictorArgs,
+				&frameworkfake.HandleImpl{
+					ClientsetImpl:                 fakeClient,
+					GetPodsAssignedToNodeFuncImpl: getPodsAssignedToNode,
+					SharedInformerFactoryImpl:     sharedInformerFactory,
+				},
+			)
+			if err != nil {
+				t.Fatalf("Unable to initialize the plugin: %v", err)
+			}
+
+			handle := &frameworkfake.HandleImpl{
+				ClientsetImpl:                 fakeClient,
+				GetPodsAssignedToNodeFuncImpl: getPodsAssignedToNode,
+				PodEvictorImpl:                podEvictor,
+				EvictorFilterImpl:             evictorFilter.(frameworktypes.EvictorPlugin),
+				SharedInformerFactoryImpl:     sharedInformerFactory,
+			}
+
+			plugin, err := NewHighNodeUtilization(&HighNodeUtilizationArgs{
 				Thresholds: api.ResourceThresholds{
 					v1.ResourceCPU: 40,
 				},

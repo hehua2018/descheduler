@@ -4,7 +4,6 @@ approvers:
 - seanmalloy
 - a7i
 - knelasevero
-- ricardomaraschini
 reviewers:
 - damemi
 - seanmalloy
@@ -14,8 +13,6 @@ reviewers:
 - janeliul
 - knelasevero
 - jklaw90
-- googs1025
-- ricardomaraschini
 emeritus_approvers:
 - aveshagarwal
 - k82cn

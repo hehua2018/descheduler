@@ -44,7 +44,7 @@ func StorageWithCacher() generic.StorageDecorator {
 		triggerFuncs storage.IndexerFuncs,
 		indexers *cache.Indexers) (storage.Interface, factory.DestroyFunc, error) {
 
-		s, d, err := generic.NewRawStorage(storageConfig, newFunc, newListFunc, resourcePrefix)
+		s, d, err := generic.NewRawStorage(storageConfig, newFunc)
 		if err != nil {
 			return s, d, err
 		}
@@ -54,34 +54,31 @@ func StorageWithCacher() generic.StorageDecorator {
 		}
 
 		cacherConfig := cacherstorage.Config{
-			Storage:             s,
-			Versioner:           storage.APIObjectVersioner{},
-			GroupResource:       storageConfig.GroupResource,
-			EventsHistoryWindow: storageConfig.EventsHistoryWindow,
-			ResourcePrefix:      resourcePrefix,
-			KeyFunc:             keyFunc,
-			NewFunc:             newFunc,
-			NewListFunc:         newListFunc,
-			GetAttrsFunc:        getAttrsFunc,
-			IndexerFuncs:        triggerFuncs,
-			Indexers:            indexers,
-			Codec:               storageConfig.Codec,
+			Storage:        s,
+			Versioner:      storage.APIObjectVersioner{},
+			GroupResource:  storageConfig.GroupResource,
+			ResourcePrefix: resourcePrefix,
+			KeyFunc:        keyFunc,
+			NewFunc:        newFunc,
+			NewListFunc:    newListFunc,
+			GetAttrsFunc:   getAttrsFunc,
+			IndexerFuncs:   triggerFuncs,
+			Indexers:       indexers,
+			Codec:          storageConfig.Codec,
 		}
 		cacher, err := cacherstorage.NewCacherFromConfig(cacherConfig)
 		if err != nil {
 			return nil, func() {}, err
 		}
-		delegator := cacherstorage.NewCacheDelegator(cacher, s)
 		var once sync.Once
 		destroyFunc := func() {
 			once.Do(func() {
-				delegator.Stop()
 				cacher.Stop()
 				d()
 			})
 		}
 
-		return delegator, destroyFunc, nil
+		return cacher, destroyFunc, nil
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	componentbaseconfig "k8s.io/component-base/config"
-
 	"sigs.k8s.io/descheduler/cmd/descheduler/app/options"
 	deschedulerapi "sigs.k8s.io/descheduler/pkg/api"
 	"sigs.k8s.io/descheduler/pkg/descheduler"
@@ -31,7 +30,6 @@ func TestClientConnectionConfiguration(t *testing.T) {
 		t.Fatalf("Unable to initialize server: %v", err)
 	}
 	s.Client = clientSet
-	s.DefaultFeatureGates = initFeatureGates()
 	evictionPolicyGroupVersion, err := eutils.SupportEviction(s.Client)
 	if err != nil || len(evictionPolicyGroupVersion) == 0 {
 		t.Errorf("Error when checking support for eviction: %v", err)

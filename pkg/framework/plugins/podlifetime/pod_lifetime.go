@@ -25,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
-
 	frameworktypes "sigs.k8s.io/descheduler/pkg/framework/types"
 
 	"sigs.k8s.io/descheduler/pkg/descheduler/evictions"
@@ -38,19 +37,17 @@ var _ frameworktypes.DeschedulePlugin = &PodLifeTime{}
 
 // PodLifeTime evicts pods on the node that violate the max pod lifetime threshold
 type PodLifeTime struct {
-	logger    klog.Logger
 	handle    frameworktypes.Handle
 	args      *PodLifeTimeArgs
 	podFilter podutil.FilterFunc
 }
 
 // New builds plugin from its arguments while passing a handle
-func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle) (frameworktypes.Plugin, error) {
+func New(args runtime.Object, handle frameworktypes.Handle) (frameworktypes.Plugin, error) {
 	podLifeTimeArgs, ok := args.(*PodLifeTimeArgs)
 	if !ok {
 		return nil, fmt.Errorf("want args to be of type PodLifeTimeArgs, got %T", args)
 	}
-	logger := klog.FromContext(ctx).WithValues("plugin", PluginName)
 
 	var includedNamespaces, excludedNamespaces sets.Set[string]
 	if podLifeTimeArgs.Namespaces != nil {
@@ -70,42 +67,17 @@ func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle)
 	}
 
 	podFilter = podutil.WrapFilterFuncs(podFilter, func(pod *v1.Pod) bool {
-		podAgeSeconds := int(metav1.Now().Sub(pod.GetCreationTimestamp().Local()).Seconds())
-		return podAgeSeconds > int(*podLifeTimeArgs.MaxPodLifeTimeSeconds)
+		podAgeSeconds := uint(metav1.Now().Sub(pod.GetCreationTimestamp().Local()).Seconds())
+		return podAgeSeconds > *podLifeTimeArgs.MaxPodLifeTimeSeconds
 	})
 
 	if len(podLifeTimeArgs.States) > 0 {
 		states := sets.New(podLifeTimeArgs.States...)
 		podFilter = podutil.WrapFilterFuncs(podFilter, func(pod *v1.Pod) bool {
-			// Pod Status Phase
 			if states.Has(string(pod.Status.Phase)) {
 				return true
 			}
 
-			// Pod Status Reason
-			if states.Has(pod.Status.Reason) {
-				return true
-			}
-
-			// Init Container Status Reason
-			if podLifeTimeArgs.IncludingInitContainers {
-				for _, containerStatus := range pod.Status.InitContainerStatuses {
-					if containerStatus.State.Waiting != nil && states.Has(containerStatus.State.Waiting.Reason) {
-						return true
-					}
-				}
-			}
-
-			// Ephemeral Container Status Reason
-			if podLifeTimeArgs.IncludingEphemeralContainers {
-				for _, containerStatus := range pod.Status.EphemeralContainerStatuses {
-					if containerStatus.State.Waiting != nil && states.Has(containerStatus.State.Waiting.Reason) {
-						return true
-					}
-				}
-			}
-
-			// Container Status Reason
 			for _, containerStatus := range pod.Status.ContainerStatuses {
 				if containerStatus.State.Waiting != nil && states.Has(containerStatus.State.Waiting.Reason) {
 					return true
@@ -117,7 +89,6 @@ func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle)
 	}
 
 	return &PodLifeTime{
-		logger:    logger,
 		handle:    handle,
 		podFilter: podFilter,
 		args:      podLifeTimeArgs,
@@ -133,9 +104,9 @@ func (d *PodLifeTime) Name() string {
 func (d *PodLifeTime) Deschedule(ctx context.Context, nodes []*v1.Node) *frameworktypes.Status {
 	podsToEvict := make([]*v1.Pod, 0)
 	nodeMap := make(map[string]*v1.Node, len(nodes))
-	logger := klog.FromContext(klog.NewContext(ctx, d.logger)).WithValues("ExtensionPoint", frameworktypes.DescheduleExtensionPoint)
+
 	for _, node := range nodes {
-		logger.V(2).Info("Processing node", "node", klog.KObj(node))
+		klog.V(2).InfoS("Processing node", "node", klog.KObj(node))
 		pods, err := podutil.ListAllPodsOnANode(node.Name, d.handle.GetPodsAssignedToNodeFunc(), d.podFilter)
 		if err != nil {
 			// no pods evicted as error encountered retrieving evictable Pods
@@ -152,19 +123,9 @@ func (d *PodLifeTime) Deschedule(ctx context.Context, nodes []*v1.Node) *framewo
 	// in the event that PDB or settings such maxNoOfPodsToEvictPer* prevent too much eviction
 	podutil.SortPodsBasedOnAge(podsToEvict)
 
-loop:
 	for _, pod := range podsToEvict {
-		err := d.handle.Evictor().Evict(ctx, pod, evictions.EvictOptions{StrategyName: PluginName})
-		if err == nil {
-			continue
-		}
-		switch err.(type) {
-		case *evictions.EvictionNodeLimitError:
-			continue loop
-		case *evictions.EvictionTotalLimitError:
-			return nil
-		default:
-			logger.Error(err, "eviction failed")
+		if !d.handle.Evictor().NodeLimitExceeded(nodeMap[pod.Spec.NodeName]) {
+			d.handle.Evictor().Evict(ctx, pod, evictions.EvictOptions{})
 		}
 	}
 

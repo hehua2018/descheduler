@@ -26,7 +26,6 @@ import (
 	"k8s.io/apiserver/pkg/server/resourceconfig"
 	serverstore "k8s.io/apiserver/pkg/server/storage"
 	cliflag "k8s.io/component-base/cli/flag"
-	"k8s.io/klog/v2"
 )
 
 // APIEnablementOptions contains the options for which resources to turn on and off.
@@ -43,9 +42,6 @@ func NewAPIEnablementOptions() *APIEnablementOptions {
 
 // AddFlags adds flags for a specific APIServer to the specified FlagSet
 func (s *APIEnablementOptions) AddFlags(fs *pflag.FlagSet) {
-	if s == nil {
-		return
-	}
 	fs.Var(&s.RuntimeConfig, "runtime-config", ""+
 		"A set of key=value pairs that enable or disable built-in APIs. Supported options are:\n"+
 		"v1=true|false for the core API group\n"+
@@ -91,28 +87,13 @@ func (s *APIEnablementOptions) Validate(registries ...GroupRegistry) []error {
 
 // ApplyTo override MergedResourceConfig with defaults and registry
 func (s *APIEnablementOptions) ApplyTo(c *server.Config, defaultResourceConfig *serverstore.ResourceConfig, registry resourceconfig.GroupVersionRegistry) error {
+
 	if s == nil {
 		return nil
 	}
 
 	mergedResourceConfig, err := resourceconfig.MergeAPIResourceConfigs(defaultResourceConfig, s.RuntimeConfig, registry)
-	if err != nil {
-		return err
-	}
-	// apply emulation forward compatibility to the api enablement if applicable.
-	if c.EmulationForwardCompatible {
-		mergedResourceConfig, err = resourceconfig.EmulationForwardCompatibleResourceConfig(mergedResourceConfig, s.RuntimeConfig, registry)
-	}
-
 	c.MergedResourceConfig = mergedResourceConfig
-
-	if binVersion, emulatedVersion := c.EffectiveVersion.BinaryVersion(), c.EffectiveVersion.EmulationVersion(); !binVersion.EqualTo(emulatedVersion) {
-		for _, version := range registry.PrioritizedVersionsAllGroups() {
-			if strings.Contains(version.Version, "alpha") {
-				klog.Warningf("alpha api enabled with emulated version %s instead of the binary's version %s, this is unsupported, proceed at your own risk: api=%s", emulatedVersion, binVersion, version.String())
-			}
-		}
-	}
 
 	return err
 }

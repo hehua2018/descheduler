@@ -18,6 +18,7 @@ package filters
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -38,7 +39,7 @@ func WithLatencyTrackers(handler http.Handler) http.Handler {
 		ctx := req.Context()
 		requestInfo, ok := request.RequestInfoFrom(ctx)
 		if !ok {
-			handleError(w, req, http.StatusInternalServerError, nil, "no RequestInfo found in context, handler chain must be wrong")
+			handleError(w, req, http.StatusInternalServerError, fmt.Errorf("no RequestInfo found in context, handler chain must be wrong"))
 			return
 		}
 
@@ -71,7 +72,9 @@ func (wt *writeLatencyTracker) Unwrap() http.ResponseWriter {
 
 func (wt *writeLatencyTracker) Write(bs []byte) (int, error) {
 	startedAt := time.Now()
-	n, err := wt.ResponseWriter.Write(bs)
-	request.TrackResponseWriteLatency(wt.ctx, time.Since(startedAt))
-	return n, err
+	defer func() {
+		request.TrackResponseWriteLatency(wt.ctx, time.Since(startedAt))
+	}()
+
+	return wt.ResponseWriter.Write(bs)
 }

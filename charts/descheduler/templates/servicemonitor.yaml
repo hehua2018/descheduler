@@ -14,7 +14,7 @@ spec:
   jobLabel: jobLabel
   namespaceSelector:
     matchNames:
-    - {{ include "descheduler.namespace" . }}
+    - {{ .Release.Namespace }}
   selector:
     matchLabels:
       {{- include "descheduler.selectorLabels" . | nindent 6 }}

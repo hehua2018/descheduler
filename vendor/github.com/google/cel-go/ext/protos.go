@@ -15,10 +15,10 @@
 package ext
 
 import (
-	"math"
-
 	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/common/ast"
+	"github.com/google/cel-go/common"
+
+	exprpb "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
 )
 
 // Protos returns a cel.EnvOption to configure extended macros and functions for
@@ -51,23 +51,8 @@ import (
 // Examples:
 //
 //	proto.hasExt(msg, google.expr.proto2.test.int32_ext) // returns true || false
-func Protos(options ...ProtosOption) cel.EnvOption {
-	l := &protoLib{version: math.MaxUint32}
-	for _, o := range options {
-		l = o(l)
-	}
-	return cel.Lib(l)
-}
-
-// ProtosOption declares a functional operator for configuring protobuf utilities.
-type ProtosOption func(*protoLib) *protoLib
-
-// ProtosVersion sets the library version for extensions for protobuf utilities.
-func ProtosVersion(version uint32) ProtosOption {
-	return func(lib *protoLib) *protoLib {
-		lib.version = version
-		return lib
-	}
+func Protos() cel.EnvOption {
+	return cel.Lib(protoLib{})
 }
 
 var (
@@ -76,9 +61,7 @@ var (
 	getExtension   = "getExt"
 )
 
-type protoLib struct {
-	version uint32
-}
+type protoLib struct{}
 
 // LibraryName implements the SingletonLibrary interface method.
 func (protoLib) LibraryName() string {
@@ -90,9 +73,9 @@ func (protoLib) CompileOptions() []cel.EnvOption {
 	return []cel.EnvOption{
 		cel.Macros(
 			// proto.getExt(msg, select_expression)
-			cel.ReceiverMacro(getExtension, 2, getProtoExt),
+			cel.NewReceiverMacro(getExtension, 2, getProtoExt),
 			// proto.hasExt(msg, select_expression)
-			cel.ReceiverMacro(hasExtension, 2, hasProtoExt),
+			cel.NewReceiverMacro(hasExtension, 2, hasProtoExt),
 		),
 	}
 }
@@ -103,56 +86,59 @@ func (protoLib) ProgramOptions() []cel.ProgramOption {
 }
 
 // hasProtoExt generates a test-only select expression for a fully-qualified extension name on a protobuf message.
-func hasProtoExt(mef cel.MacroExprFactory, target ast.Expr, args []ast.Expr) (ast.Expr, *cel.Error) {
+func hasProtoExt(meh cel.MacroExprHelper, target *exprpb.Expr, args []*exprpb.Expr) (*exprpb.Expr, *common.Error) {
 	if !macroTargetMatchesNamespace(protoNamespace, target) {
 		return nil, nil
 	}
-	extensionField, err := getExtFieldName(mef, args[1])
+	extensionField, err := getExtFieldName(meh, args[1])
 	if err != nil {
 		return nil, err
 	}
-	return mef.NewPresenceTest(args[0], extensionField), nil
+	return meh.PresenceTest(args[0], extensionField), nil
 }
 
 // getProtoExt generates a select expression for a fully-qualified extension name on a protobuf message.
-func getProtoExt(mef cel.MacroExprFactory, target ast.Expr, args []ast.Expr) (ast.Expr, *cel.Error) {
+func getProtoExt(meh cel.MacroExprHelper, target *exprpb.Expr, args []*exprpb.Expr) (*exprpb.Expr, *common.Error) {
 	if !macroTargetMatchesNamespace(protoNamespace, target) {
 		return nil, nil
 	}
-	extFieldName, err := getExtFieldName(mef, args[1])
+	extFieldName, err := getExtFieldName(meh, args[1])
 	if err != nil {
 		return nil, err
 	}
-	return mef.NewSelect(args[0], extFieldName), nil
+	return meh.Select(args[0], extFieldName), nil
 }
 
-func getExtFieldName(mef cel.MacroExprFactory, expr ast.Expr) (string, *cel.Error) {
+func getExtFieldName(meh cel.MacroExprHelper, expr *exprpb.Expr) (string, *common.Error) {
 	isValid := false
 	extensionField := ""
-	switch expr.Kind() {
-	case ast.SelectKind:
+	switch expr.GetExprKind().(type) {
+	case *exprpb.Expr_SelectExpr:
 		extensionField, isValid = validateIdentifier(expr)
 	}
 	if !isValid {
-		return "", mef.NewError(expr.ID(), "invalid extension field")
+		return "", &common.Error{
+			Message:  "invalid extension field",
+			Location: meh.OffsetLocation(expr.GetId()),
+		}
 	}
 	return extensionField, nil
 }
 
-func validateIdentifier(expr ast.Expr) (string, bool) {
-	switch expr.Kind() {
-	case ast.IdentKind:
-		return expr.AsIdent(), true
-	case ast.SelectKind:
-		sel := expr.AsSelect()
-		if sel.IsTestOnly() {
+func validateIdentifier(expr *exprpb.Expr) (string, bool) {
+	switch expr.GetExprKind().(type) {
+	case *exprpb.Expr_IdentExpr:
+		return expr.GetIdentExpr().GetName(), true
+	case *exprpb.Expr_SelectExpr:
+		sel := expr.GetSelectExpr()
+		if sel.GetTestOnly() {
 			return "", false
 		}
-		opStr, isIdent := validateIdentifier(sel.Operand())
+		opStr, isIdent := validateIdentifier(sel.GetOperand())
 		if !isIdent {
 			return "", false
 		}
-		return opStr + "." + sel.FieldName(), true
+		return opStr + "." + sel.GetField(), true
 	default:
 		return "", false
 	}

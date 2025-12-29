@@ -37,10 +37,6 @@ type testLib struct {
 	version uint32
 }
 
-func (*testLib) LibraryName() string {
-	return "kubernetes.test"
-}
-
 type TestOption func(*testLib) *testLib
 
 func TestVersion(version uint32) func(lib *testLib) *testLib {

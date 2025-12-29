@@ -11,7 +11,7 @@ helm install my-release --namespace kube-system descheduler/descheduler
 
 ## Introduction
 
-This chart bootstraps a [descheduler](https://github.com/kubernetes-sigs/descheduler/) cron job with a default DeschedulerPolicy on a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager. To preview what changes descheduler would make without actually going forward with the changes, you can install descheduler in dry run mode by providing the flag `--set cmdOptions.dry-run=true` to the `helm install` command below.
+This chart bootstraps a [descheduler](https://github.com/kubernetes-sigs/descheduler/) cron job on a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
 ## Prerequisites
 
@@ -52,7 +52,6 @@ The following table lists the configurable parameters of the _descheduler_ chart
 | `imagePullSecrets`                  | Docker repository secrets                                                                                             | `[]`                                      |
 | `nameOverride`                      | String to partially override `descheduler.fullname` template (will prepend the release name)                          | `""`                                      |
 | `fullnameOverride`                  | String to fully override `descheduler.fullname` template                                                              | `""`                                      |
-| `namespaceOverride`                 | Override the deployment namespace; defaults to .Release.Namespace                                                     | `""`                                      |
 | `cronJobApiVersion`                 | CronJob API Group Version                                                                                             | `"batch/v1"`                              |
 | `schedule`                          | The cron schedule to run the _descheduler_ job on                                                                     | `"*/2 * * * *"`                           |
 | `startingDeadlineSeconds`           | If set, configure `startingDeadlineSeconds` for the _descheduler_ job                                                 | `nil`                                     |
@@ -64,16 +63,13 @@ The following table lists the configurable parameters of the _descheduler_ chart
 | `replicas`                          | The replica count for Deployment                                                                                      | `1`                                       |
 | `leaderElection`                    | The options for high availability when running replicated components                                                  | _see values.yaml_                         |
 | `cmdOptions`                        | The options to pass to the _descheduler_ command                                                                      | _see values.yaml_                         |
+| `deschedulerPolicy.strategies`      | The _descheduler_ strategies to apply                                                                                 | _see values.yaml_                         |
 | `priorityClassName`                 | The name of the priority class to add to pods                                                                         | `system-cluster-critical`                 |
 | `rbac.create`                       | If `true`, create & use RBAC resources                                                                                | `true`                                    |
 | `resources`                         | Descheduler container CPU and memory requests/limits                                                                  | _see values.yaml_                         |
 | `serviceAccount.create`             | If `true`, create a service account for the cron job                                                                  | `true`                                    |
 | `serviceAccount.name`               | The name of the service account to use, if not set and create is true a name is generated using the fullname template | `nil`                                     |
 | `serviceAccount.annotations`        | Specifies custom annotations for the serviceAccount                                                                   | `{}`                                      |
-| `cronJobAnnotations`                | Annotations to add to the descheduler CronJob                                                                         | `{}`                                      |
-| `cronJobLabels`                     | Labels to add to the descheduler CronJob                                                                              | `{}`                                      |
-| `jobAnnotations`                    | Annotations to add to the descheduler Job resources (created by CronJob)                                              | `{}`                                      |
-| `jobLabels`                         | Labels to add to the descheduler Job resources (created by CronJob)                                                   | `{}`                                      |
 | `podAnnotations`                    | Annotations to add to the descheduler Pods                                                                            | `{}`                                      |
 | `podLabels`                         | Labels to add to the descheduler Pods                                                                                 | `{}`                                      |
 | `nodeSelector`                      | Node selectors to run the descheduler cronjob/deployment on specific nodes                                            | `nil`                                     |
@@ -88,7 +84,6 @@ The following table lists the configurable parameters of the _descheduler_ chart
 | `serviceMonitor.metricRelabelings`  | MetricRelabelConfigs to apply to samples after scraping, but before ingestion                                         | `[]`                                      |
 | `serviceMonitor.relabelings`        | RelabelConfigs to apply to samples before scraping                                                                    | `[]`                                      |
 | `affinity`                          | Node affinity to run the descheduler cronjob/deployment on specific nodes                                             | `nil`                                     |
-| `topologySpreadConstraints`         | Topology Spread Constraints to spread the descheduler cronjob/deployment across the cluster                           | `[]`                                     |
 | `tolerations`                       | tolerations to run the descheduler cronjob/deployment on specific nodes                                               | `nil`                                     |
 | `suspend`                           | Set spec.suspend in descheduler cronjob                                                                               | `false`                                   |
 | `commonLabels`                      | Labels to apply to all resources                                                                                      | `{}`                                      |

@@ -2,7 +2,7 @@
 ![Release Charts](https://github.com/kubernetes-sigs/descheduler/workflows/Release%20Charts/badge.svg)
 
 <p align="left">
-	↗️️ Click at the [bullet list icon] at the top right corner of the Readme visualization for the github generated table of contents.
+	↖️ Click at the [bullet list icon] at the top left corner of the Readme visualization for the github generated table of contents.
 </p>
 
 <p align="center">
@@ -33,16 +33,16 @@ but relies on the default scheduler for that.
 ## ⚠️  Documentation Versions by Release
 
 If you are using a published release of Descheduler (such as
-`registry.k8s.io/descheduler/descheduler:v0.34.0`), follow the documentation in
+`registry.k8s.io/descheduler/descheduler:v0.26.1`), follow the documentation in
 that version's release branch, as listed below:
 
 |Descheduler Version|Docs link|
 |---|---|
-|v0.34.x|[`release-1.34`](https://github.com/kubernetes-sigs/descheduler/blob/release-1.34/README.md)|
-|v0.33.x|[`release-1.33`](https://github.com/kubernetes-sigs/descheduler/blob/release-1.33/README.md)|
-|v0.32.x|[`release-1.32`](https://github.com/kubernetes-sigs/descheduler/blob/release-1.32/README.md)|
-|v0.31.x|[`release-1.31`](https://github.com/kubernetes-sigs/descheduler/blob/release-1.31/README.md)|
-|v0.30.x|[`release-1.30`](https://github.com/kubernetes-sigs/descheduler/blob/release-1.30/README.md)|
+|v0.28.x|[`release-1.28`](https://github.com/kubernetes-sigs/descheduler/blob/release-1.28/README.md)|
+|v0.27.x|[`release-1.27`](https://github.com/kubernetes-sigs/descheduler/blob/release-1.27/README.md)|
+|v0.26.x|[`release-1.26`](https://github.com/kubernetes-sigs/descheduler/blob/release-1.26/README.md)|
+|v0.25.x|[`release-1.25`](https://github.com/kubernetes-sigs/descheduler/blob/release-1.25/README.md)|
+|v0.24.x|[`release-1.24`](https://github.com/kubernetes-sigs/descheduler/blob/release-1.24/README.md)|
 
 The
 [`master`](https://github.com/kubernetes-sigs/descheduler/blob/master/README.md)
@@ -94,17 +94,17 @@ See the [resources | Kustomize](https://kubectl.docs.kubernetes.io/references/ku
 
 Run As A Job
 ```
-kustomize build 'github.com/kubernetes-sigs/descheduler/kubernetes/job?ref=release-1.34' | kubectl apply -f -
+kustomize build 'github.com/kubernetes-sigs/descheduler/kubernetes/job?ref=v0.26.1' | kubectl apply -f -
 ```
 
 Run As A CronJob
 ```
-kustomize build 'github.com/kubernetes-sigs/descheduler/kubernetes/cronjob?ref=release-1.34' | kubectl apply -f -
+kustomize build 'github.com/kubernetes-sigs/descheduler/kubernetes/cronjob?ref=v0.26.1' | kubectl apply -f -
 ```
 
 Run As A Deployment
 ```
-kustomize build 'github.com/kubernetes-sigs/descheduler/kubernetes/deployment?ref=release-1.34' | kubectl apply -f -
+kustomize build 'github.com/kubernetes-sigs/descheduler/kubernetes/deployment?ref=v0.26.1' | kubectl apply -f -
 ```
 
 ## User Guide
@@ -113,106 +113,34 @@ See the [user guide](docs/user-guide.md) in the `/docs` directory.
 
 ## Policy, Default Evictor and Strategy plugins
 
+**⚠️ v1alpha1 configuration is still supported, but deprecated (and soon will be removed). Please consider migrating to v1alpha2 (described bellow). For previous v1alpha1 documentation go to [docs/deprecated/v1alpha1.md](docs/deprecated/v1alpha1.md) ⚠️**
+
 The Descheduler Policy is configurable and includes default strategy plugins that can be enabled or disabled. It includes a common eviction configuration at the top level, as well as configuration from the Evictor plugin (Default Evictor, if not specified otherwise). Top-level configuration and Evictor plugin configuration are applied to all evictions.
 
 ### Top Level configuration
 
 These are top level keys in the Descheduler Policy that you can use to configure all evictions.
 
-| Name                               | type     | Default Value | Description                                                                                                                |
-|------------------------------------|----------|---------------|----------------------------------------------------------------------------------------------------------------------------|
-| `nodeSelector`                     | `string` | `nil`         | Limiting the nodes which are processed. Only used when `nodeFit`=`true` and only by the PreEvictionFilter Extension Point. |
-| `maxNoOfPodsToEvictPerNode`        | `int`    | `nil`         | Maximum number of pods evicted from each node (summed through all strategies).                                             |
-| `maxNoOfPodsToEvictPerNamespace`   | `int`    | `nil`         | Maximum number of pods evicted from each namespace (summed through all strategies).                                        |
-| `maxNoOfPodsToEvictTotal`          | `int`    | `nil`         | Maximum number of pods evicted per rescheduling cycle (summed through all strategies).                                     |
-| `metricsCollector` (deprecated)    | `object` | `nil`         | Configures collection of metrics for actual resource utilization.                                                          |
-| `metricsCollector.enabled`         | `bool`   | `false`       | Enables Kubernetes [Metrics Server](https://kubernetes-sigs.github.io/metrics-server/) collection.                         |
-| `metricsProviders`                 | `[]object` | `nil`       | Enables various metrics providers like Kubernetes [Metrics Server](https://kubernetes-sigs.github.io/metrics-server/)      |
-| `evictionFailureEventNotification` | `bool`   | `false`       | Enables eviction failure event notification.                                                                               |
-| `gracePeriodSeconds`               | `int`    | `nil`           | The duration in seconds before the object should be deleted. The value zero indicates delete immediately. If this value is nil, the default grace period for the specified type will be used.            |
-| `prometheus` |`object`| `nil` | Configures collection of Prometheus metrics for actual resource utilization |
-| `prometheus.url` |`string`| `nil` | Points to a Prometheus server url |
-| `prometheus.authToken` |`object`| `nil` | Sets Prometheus server authentication token. If not specified in cluster authentication token from the container's file system is read. |
-| `prometheus.authToken.secretReference` |`object`| `nil` | Read the authentication token from a kubernetes secret (the secret is expected to contain the token under `prometheusAuthToken` data key) |
-| `prometheus.authToken.secretReference.namespace` |`string`| `nil` | Authentication token kubernetes secret namespace (currently, the RBAC configuration permits retrieving secrets from the `kube-system` namespace. If the secret needs to be accessed from a different namespace, the existing RBAC rules must be explicitly extended. |
-| `prometheus.authToken.secretReference.name` |`string`| `nil` | Authentication token kubernetes secret name |
-
-The descheduler currently allows to configure a metric collection of Kubernetes Metrics through `metricsProviders` field.
-The previous way of setting `metricsCollector` field is deprecated. There are currently two sources to configure:
-- `KubernetesMetrics`: enables metrics collection from Kubernetes Metrics server
-- `Prometheus`: enables metrics collection from Prometheus server
-
-In general, each plugin can consume metrics from a different provider so multiple distinct providers can be configured in parallel.
-
+| Name |type| Default Value | Description |
+|------|----|---------------|-------------|
+| `nodeSelector` |`string`| `nil` | limiting the nodes which are processed. Only used when `nodeFit`=`true` and only by the PreEvictionFilter Extension Point |
+| `maxNoOfPodsToEvictPerNode` |`int`| `nil` | maximum number of pods evicted from each node (summed through all strategies) |
+| `maxNoOfPodsToEvictPerNamespace` |`int`| `nil` | maximum number of pods evicted from each namespace (summed through all strategies) |
 
 ### Evictor Plugin configuration (Default Evictor)
 
 The Default Evictor Plugin is used by default for filtering pods before processing them in an strategy plugin, or for applying a PreEvictionFilter of pods before eviction. You can also create your own Evictor Plugin or use the Default one provided by Descheduler.  Other uses for the Evictor plugin can be to sort, filter, validate or group pods by different criteria, and that's why this is handled by a plugin and not configured in the top level config.
 
-| Name                      | Type                   | Default Value | Description                                                                                                                                                                                                         |
-|---------------------------|------------------------|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `nodeSelector`            | `string`               | `nil`         | Limits the nodes that are processed.                                                                                                                                                                                |
-| `evictLocalStoragePods`   | `bool`                 | `false`       | **[Deprecated: Use `podProtections` with `"PodsWithLocalStorage"` instead]**<br>Allows eviction of pods using local storage.                                                                                        |
-| `evictDaemonSetPods`      | `bool`                 | `false`       | **[Deprecated: Use `podProtections` with `"DaemonSetPods"` instead]**<br>Allows eviction of DaemonSet managed Pods.                                                                                                 |
-| `evictSystemCriticalPods` | `bool`                 | `false`       | **[Deprecated: Use `podProtections` with `"SystemCriticalPods"` instead]**<br>[Warning: Will evict Kubernetes system pods] Allows eviction of pods with any priority, including system-critical pods like kube-dns. |
-| `ignorePvcPods`           | `bool`                 | `false`       | **[Deprecated: Use `podProtections` with `"PodsWithPVC"` instead]**<br>Sets whether PVC pods should be evicted or ignored.                                                                                          |
-| `evictFailedBarePods`     | `bool`                 | `false`       | **[Deprecated: Use `podProtections` with `"FailedBarePods"` instead]**<br>Allows eviction of pods without owner references and in a failed phase.                                                                   |
-| `ignorePodsWithoutPDB`    | `bool`                 | `false`       | **[Deprecated: Use `podProtections` with `"PodsWithoutPDB"` instead]**<br>Sets whether pods without PodDisruptionBudget should be evicted or ignored.                                                               |
-| `labelSelector`           | `metav1.LabelSelector` |               | (See [label filtering](#label-filtering))                                                                                                                                                                           |
-| `priorityThreshold`       | `priorityThreshold`    |               | (See [priority filtering](#priority-filtering))                                                                                                                                                                     |
-| `nodeFit`                 | `bool`                 | `false`       | (See [node fit filtering](#node-fit-filtering))                                                                                                                                                                     |
-| `minReplicas`             | `uint`                 | `0`           | Ignores eviction of pods where the owner (e.g., `ReplicaSet`) replicas are below this threshold.                                                                                                                    |
-| `minPodAge`               | `metav1.Duration`      | `0`           | Ignores eviction of pods with a creation time within this threshold.                                                                                                                                                |
-| `noEvictionPolicy`        | `enum`                 | ``            | sets whether a `descheduler.alpha.kubernetes.io/prefer-no-eviction` pod annotation is considered preferred or mandatory. Accepted values: "", "Preferred", "Mandatory". Defaults to "Preferred".                    |
-| `podProtections`          | `PodProtections`       | `{}`          | Holds the list of enabled and disabled protection pod policies.<br>Users can selectively disable certain default protection rules or enable extra ones. See below for supported values.                             |
-
-#### Supported Values for `podProtections.DefaultDisabled`
-
-> Setting a value in `defaultDisabled` **disables the corresponding default protection rule**. This means the specified type of Pods will **no longer be protected** from eviction and may be evicted if they meet other criteria.
-
-| Value                    | Meaning                                                                 |
-|--------------------------|-------------------------------------------------------------------------|
-| `"PodsWithLocalStorage"` | Allow eviction of Pods using local storage.                             |
-| `"DaemonSetPods"`        | Allow eviction of DaemonSet-managed Pods.                               |
-| `"SystemCriticalPods"`   | Allow eviction of system-critical Pods.                                 |
-| `"FailedBarePods"`       | Allow eviction of failed bare Pods (without controllers).               |
-
----
-
-#### Supported Values for `podProtections.ExtraEnabled`
-
-> Setting a value in `extraEnabled` **enables an additional protection rule**. This means the specified type of Pods will be **protected** from eviction.
-
-| Value                      | Meaning                                                          |
-|----------------------------|------------------------------------------------------------------|
-| `"PodsWithPVC"`            | Prevents eviction of Pods using Persistent Volume Claims (PVCs). |
-| `"PodsWithoutPDB"`         | Prevents eviction of Pods without a PodDisruptionBudget (PDB).   |
-| `"PodsWithResourceClaims"` | Prevents eviction of Pods using ResourceClaims.                  |
-
-
-#### Protecting pods using specific Storage Classes
-
-With the `PodsWithPVC` protection enabled all pods using PVCs are protected from eviction by default, if needed you can restrict the protection by filtering by PVC storage class. When filtering out by storage class, only pods using PVCs with the specified storage classes are protected from eviction. For example:
-
-```yaml
-apiVersion: "descheduler/v1alpha2"
-kind: "DeschedulerPolicy"
-profiles:
-- name: ProfileName
-  pluginConfig:
-  - name: "DefaultEvictor"
-    args:
-      podProtections:
-        extraEnabled:
-        - PodsWithPVC
-        config:
-          PodsWithPVC:
-            protectedStorageClasses:
-            - name: storage-class-0
-            - name: storage-class-1
-
-```
-This example will protect pods using PVCs with storage classes `storage-class-0` and `storage-class-1` from eviction.
+| Name |type| Default Value | Description |
+|------|----|---------------|-------------|
+| `nodeSelector` |`string`| `nil` | limiting the nodes which are processed |
+| `evictLocalStoragePods` |`bool`| `false` | allows eviction of pods with local storage |
+| `evictSystemCriticalPods` |`bool`| `false` | [Warning: Will evict Kubernetes system pods] allows eviction of pods with any priority, including system pods like kube-dns |
+| `ignorePvcPods` |`bool`| `false` | set whether PVC pods should be evicted or ignored |
+| `evictFailedBarePods` |`bool`| `false` | allow eviction of pods without owner references and in failed phase |
+|`labelSelector`|`metav1.LabelSelector`||(see [label filtering](#label-filtering))|
+|`priorityThreshold`|`priorityThreshold`||(see [priority filtering](#priority-filtering))|
+|`nodeFit`|`bool`|`false`|(see [node fit filtering](#node-fit-filtering))|
 
 ### Example policy
 
@@ -228,35 +156,15 @@ kind: "DeschedulerPolicy"
 nodeSelector: "node=node1" # you don't need to set this, if not set all will be processed
 maxNoOfPodsToEvictPerNode: 5000 # you don't need to set this, unlimited if not set
 maxNoOfPodsToEvictPerNamespace: 5000 # you don't need to set this, unlimited if not set
-maxNoOfPodsToEvictTotal: 5000 # you don't need to set this, unlimited if not set
-gracePeriodSeconds: 60 # you don't need to set this, 0 if not set
-# you don't need to set this, metrics are not collected if not set
-metricsProviders:
-- source: Prometheus
-  prometheus:
-    url: http://prometheus-kube-prometheus-prometheus.prom.svc.cluster.local
-    authToken:
-      secretReference:
-        namespace: "kube-system"
-        name: "authtoken"
 profiles:
   - name: ProfileName
     pluginConfig:
     - name: "DefaultEvictor"
       args:
-        podProtections:
-          defaultDisabled:
-            #- "PodsWithLocalStorage"
-            #- "SystemCriticalPods"
-            #- "DaemonSetPods"
-            #- "FailedBarePods"
-          extraEnabled:
-            #- "PodsWithPVC"
-            #- "PodsWithoutPDB"
-            #- "PodsWithResourceClaims"
-          config: {}
+        evictSystemCriticalPods: true
+        evictFailedBarePods: true
+        evictLocalStoragePods: true
         nodeFit: true
-        minReplicas: 2
     plugins:
       # DefaultEvictor is enabled for both `filter` and `preEvictionFilter`
       # filter:
@@ -296,7 +204,7 @@ Balance Plugins: These plugins process all pods, or groups of pods, and determin
 | [RemovePodsViolatingTopologySpreadConstraint](#removepodsviolatingtopologyspreadconstraint) |Balance|Evicts pods violating TopologySpreadConstraints|
 | [RemovePodsHavingTooManyRestarts](#removepodshavingtoomanyrestarts) |Deschedule|Evicts pods having too many restarts|
 | [PodLifeTime](#podlifetime) |Deschedule|Evicts pods that have exceeded a specified age limit|
-| [RemoveFailedPods](#removefailedpods) |Deschedule|Evicts pods with certain failed reasons and exit codes|
+| [RemoveFailedPods](#removefailedpods) |Deschedule|Evicts pods with certain failed reasons|
 
 
 ### RemoveDuplicates
@@ -366,18 +274,11 @@ If that parameter is set to `true`, the thresholds are considered as percentage 
 `thresholds` will be deducted from the mean among all nodes and `targetThresholds` will be added to the mean.
 A resource consumption above (resp. below) this window is considered as overutilization (resp. underutilization).
 
-**NOTE:** By default node resource consumption is determined by the requests and limits of pods, not actual usage.
+**NOTE:** Node resource consumption is determined by the requests and limits of pods, not actual usage.
 This approach is chosen in order to maintain consistency with the kube-scheduler, which follows the same
 design for scheduling pods onto nodes. This means that resource usage as reported by Kubelet (or commands
 like `kubectl top`) may differ from the calculated consumption, due to these components reporting
-actual usage metrics. Metrics-based descheduling can be enabled by setting `metricsUtilization.metricsServer` field (deprecated)
-or `metricsUtilization.source` field to `KubernetesMetrics`.
-In order to have the plugin consume the metrics the metric provider needs to be configured as well.
-Alternatively, it is possible to create a prometheus client and configure a prometheus query to consume
-metrics outside of the kubernetes metrics server. The query is expected to return a vector of values for
-each node. The values are expected to be any real number within <0; 1> interval. During eviction only
-a single pod is evicted at most from each overutilized node. There's currently no support for evicting more.
-See `metricsProviders` field at [Top Level configuration](#top-level-configuration) for available options.
+actual usage metrics. Implementing metrics-based descheduling is currently TODO for the project.
 
 **Parameters:**
 
@@ -387,13 +288,7 @@ See `metricsProviders` field at [Top Level configuration](#top-level-configurati
 |`thresholds`|map(string:int)|
 |`targetThresholds`|map(string:int)|
 |`numberOfNodes`|int|
-|`evictionLimits`|object|
 |`evictableNamespaces`|(see [namespace filtering](#namespace-filtering))|
-|`metricsUtilization`|object|
-|`metricsUtilization.metricsServer` (deprecated)|bool|
-|`metricsUtilization.source`|string|
-|`metricsUtilization.prometheus.query`|string|
-
 
 **Example:**
 
@@ -413,12 +308,6 @@ profiles:
           "cpu" : 50
           "memory": 50
           "pods": 50
-        # metricsUtilization:
-        #   source: Prometheus
-        #   prometheus:
-        #     query: instance:node_cpu:rate:sum
-        evictionLimits:
-          node: 5
     plugins:
       balance:
         enabled:
@@ -434,12 +323,10 @@ and will not be used to compute node's usage if it's not specified in `threshold
 * The valid range of the resource's percentage value is \[0, 100\]
 * Percentage value of `thresholds` can not be greater than `targetThresholds` for the same resource.
 
-There are two more parameters associated with the `LowNodeUtilization` strategy, called `numberOfNodes` and `evictionLimits`.
-The first parameter can be configured to activate the strategy only when the number of under utilized nodes
+There is another parameter associated with the `LowNodeUtilization` strategy, called `numberOfNodes`.
+This parameter can be configured to activate the strategy only when the number of under utilized nodes
 are above the configured value. This could be helpful in large clusters where a few nodes could go
 under utilized frequently or for a short period of time. By default, `numberOfNodes` is set to zero.
-The second parameter is useful when a number of evictions per the plugin per a descheduling cycle needs to be limited.
-The parameter currently enables to limit the number of evictions per node through `node` field.
 
 ### HighNodeUtilization
 
@@ -465,12 +352,6 @@ strategy evicts pods from `underutilized nodes` (those with usage below `thresho
 so that they can be recreated in appropriately utilized nodes.
 The strategy will abort if any number of `underutilized nodes` or `appropriately utilized nodes` is zero.
 
-To control pod eviction from underutilized nodes, use the `evictionModes`
-array. A lenient policy, which evicts pods regardless of their resource
-requests, is the default. To enable a stricter policy that only evicts pods
-with resource requests defined for the provided threshold resources, add the
-option `OnlyThresholdingResources` to the `evictionModes` configuration.
-
 **NOTE:** Node resource consumption is determined by the requests and limits of pods, not actual usage.
 This approach is chosen in order to maintain consistency with the kube-scheduler, which follows the same
 design for scheduling pods onto nodes. This means that resource usage as reported by Kubelet (or commands
@@ -483,14 +364,7 @@ actual usage metrics. Implementing metrics-based descheduling is currently TODO 
 |---|---|
 |`thresholds`|map(string:int)|
 |`numberOfNodes`|int|
-|`evictionModes`|list(string)|
 |`evictableNamespaces`|(see [namespace filtering](#namespace-filtering))|
-
-**Supported Eviction Modes:**
-
-|Name|Description|
-|---|---|
-|`OnlyThresholdingResources`|Evict only pods that have resource requests defined for the provided threshold resources.|
 
 **Example:**
 
@@ -510,8 +384,6 @@ profiles:
           exclude:
           - "kube-system"
           - "namespace1"
-        evictionModes:
-          - "OnlyThresholdingResources"
     plugins:
       balance:
         enabled:
@@ -627,22 +499,18 @@ key=value matches an excludedTaints entry, the taint will be ignored.
 For example, excludedTaints entry "dedicated" would match all taints with key "dedicated", regardless of value.
 excludedTaints entry "dedicated=special-user" would match taints with key "dedicated" and value "special-user".
 
-If a list of includedTaints is provided, a taint will be considered if and only if it matches an included key **or** key=value from the list. Otherwise it will be ignored. Leaving includedTaints unset will include any taint by default.
-
 **Parameters:**
 
 |Name|Type|
 |---|---|
 |`excludedTaints`|list(string)|
-|`includedTaints`|list(string)|
 |`includePreferNoSchedule`|bool|
 |`namespaces`|(see [namespace filtering](#namespace-filtering))|
 |`labelSelector`|(see [label filtering](#label-filtering))|
 
 **Example:**
 
-Setting `excludedTaints`
-```yaml
+````yaml
 apiVersion: "descheduler/v1alpha2"
 kind: "DeschedulerPolicy"
 profiles:
@@ -657,25 +525,7 @@ profiles:
       deschedule:
         enabled:
           - "RemovePodsViolatingNodeTaints"
-```
-
-Setting `includedTaints`
-```yaml
-apiVersion: "descheduler/v1alpha2"
-kind: "DeschedulerPolicy"
-profiles:
-  - name: ProfileName
-    pluginConfig:
-    - name: "RemovePodsViolatingNodeTaints"
-      args:
-        includedTaints:
-        - decommissioned=end-of-life # include only taints with key "decommissioned" and value "end-of-life"
-        - reserved # include all taints with key "reserved"
-    plugins:
-      deschedule:
-        enabled:
-          - "RemovePodsViolatingNodeTaints"
-```
+````
 
 ### RemovePodsViolatingTopologySpreadConstraint
 
@@ -786,25 +636,20 @@ profiles:
 This strategy evicts pods that are older than `maxPodLifeTimeSeconds`.
 
 You can also specify `states` parameter to **only** evict pods matching the following conditions:
-> The primary purpose for using states like `Succeeded` and `Failed` is releasing resources so that new pods can be rescheduled.
-> I.e., the main motivation is not for cleaning pods, rather to release resources.
-  - [Pod Phase](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-phase) status of: `Running`, `Pending`, `Succeeded`, `Failed`, `Unknown`
-  - [Pod Reason](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-conditions) reasons of: `NodeAffinity`, `NodeLost`, `Shutdown`, `UnexpectedAdmissionError`
-  - [Container State Waiting](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#container-state-waiting) condition of: `PodInitializing`, `ContainerCreating`, `ImagePullBackOff`, `CrashLoopBackOff`, `CreateContainerConfigError`, `ErrImagePull`, `ImagePullBackOff`, `CreateContainerError`, `InvalidImageName`
+  - [Pod Phase](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-phase) status of: `Running`, `Pending`
+  - [Container State Waiting](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#container-state-waiting) condition of: `PodInitializing`, `ContainerCreating`
 
 If a value for `states` or `podStatusPhases` is not specified,
 Pods in any state (even `Running`) are considered for eviction.
 
 **Parameters:**
 
-| Name                           | Type                                              | Notes                    |
-|--------------------------------|---------------------------------------------------|--------------------------|
-| `maxPodLifeTimeSeconds`        | int                                               |                          |
-| `states`                       | list(string)                                      | Only supported in v0.25+ |
-| `includingInitContainers`      | bool                                              | Only supported in v0.31+ |
-| `includingEphemeralContainers` | bool                                              | Only supported in v0.31+ |
-| `namespaces`                   | (see [namespace filtering](#namespace-filtering)) |                          |
-| `labelSelector`                | (see [label filtering](#label-filtering))         |                          |
+|Name|Type|Notes|
+|---|---|---|
+|`maxPodLifeTimeSeconds`|int||
+|`states`|list(string)|Only supported in v0.25+|
+|`namespaces`|(see [namespace filtering](#namespace-filtering))||
+|`labelSelector`|(see [label filtering](#label-filtering))||
 
 **Example:**
 
@@ -827,8 +672,10 @@ profiles:
 ```
 
 ### RemoveFailedPods
+
 This strategy evicts pods that are in failed status phase.
-You can provide optional parameters to filter by failed pods' and containters' `reasons`. and `exitCodes`. `exitCodes` apply to failed pods' containers with `terminated` state only. `reasons` and `exitCodes` can be expanded to include those of InitContainers as well by setting the optional parameter `includingInitContainers` to `true`.
+You can provide an optional parameter to filter by failed `reasons`.
+`reasons` can be expanded to include reasons of InitContainers as well by setting the optional parameter `includingInitContainers` to `true`.
 You can specify an optional parameter `minPodLifetimeSeconds` to evict pods that are older than specified seconds.
 Lastly, you can specify the optional parameter `excludeOwnerKinds` and if a pod
 has any of these `Kind`s listed as an `OwnerRef`, that pod will not be considered for eviction.
@@ -840,7 +687,6 @@ has any of these `Kind`s listed as an `OwnerRef`, that pod will not be considere
 |`minPodLifetimeSeconds`|uint|
 |`excludeOwnerKinds`|list(string)|
 |`reasons`|list(string)|
-|`exitCodes`|list(int32)|
 |`includingInitContainers`|bool|
 |`namespaces`|(see [namespace filtering](#namespace-filtering))|
 |`labelSelector`|(see [label filtering](#label-filtering))|
@@ -857,8 +703,6 @@ profiles:
       args:
         reasons:
         - "NodeAffinity"
-        exitCodes:
-        - 1
         includingInitContainers: true
         excludeOwnerKinds:
         - "Job"
@@ -873,7 +717,7 @@ profiles:
 
 ### Namespace filtering
 
-The following strategies accept a `namespaces` parameter which allows to specify a list of including and excluding namespaces respectively:
+The following strategies accept a `namespaces` parameter which allows to specify a list of including, resp. excluding namespaces:
 * `PodLifeTime`
 * `RemovePodsHavingTooManyRestarts`
 * `RemovePodsViolatingNodeTaints`
@@ -883,10 +727,11 @@ The following strategies accept a `namespaces` parameter which allows to specify
 * `RemovePodsViolatingTopologySpreadConstraint`
 * `RemoveFailedPods`
 
-The following strategies accept an `evictableNamespaces` parameter which allows to specify a list of excluding namespaces:
+
+The following strategies accept a `evictableNamespaces` parameter which allows to specify a list of excluding namespaces:
 * `LowNodeUtilization` and `HighNodeUtilization` (Only filtered right before eviction)
 
-In the following example with `PodLifeTime`, `PodLifeTime` gets executed only over `namespace1` and `namespace2`.
+For example with PodLifeTime:
 
 ```yaml
 apiVersion: "descheduler/v1alpha2"
@@ -907,7 +752,8 @@ profiles:
           - "PodLifeTime"
 ```
 
-The similar holds for `exclude` field. The strategy gets executed over all namespaces but `namespace1` and `namespace2` in the following example.
+In the example `PodLifeTime` gets executed only over `namespace1` and `namespace2`.
+The similar holds for `exclude` field:
 
 ```yaml
 apiVersion: "descheduler/v1alpha2"
@@ -928,7 +774,9 @@ profiles:
           - "PodLifeTime"
 ```
 
-It's not allowed to combine `include` with `exclude` field.
+The strategy gets executed over all namespaces but `namespace1` and `namespace2`.
+
+It's not allowed to compute `include` with `exclude` field.
 
 ### Priority filtering
 
@@ -986,7 +834,7 @@ does not exist, descheduler won't create it and will throw an error.
 
 ### Label filtering
 
-The following strategies can configure a [standard kubernetes labelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#labelselector-v1-meta)
+The following strategies can configure a [standard kubernetes labelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.26/#labelselector-v1-meta)
 to filter pods by their labels:
 
 * `PodLifeTime`
@@ -1031,7 +879,6 @@ profiles:
 - `nodeAffinity` on the pod
 - Resource `requests` made by the pod and the resources available on other nodes
 - Whether any of the other nodes are marked as `unschedulable`
-- Any `podAntiAffinity` between the pod and the pods on the other nodes
 
 E.g.
 
@@ -1053,7 +900,7 @@ profiles:
           - "PodLifeTime"
 ```
 
-Note that node fit filtering references the current pod spec, and not that of its owner.
+Note that node fit filtering references the current pod spec, and not that of it's owner.
 Thus, if the pod is owned by a ReplicationController (and that ReplicationController was modified recently),
 the pod may be running with an outdated spec, which the descheduler will reference when determining node fit.
 This is expected behavior as the descheduler is a "best-effort" mechanism.
@@ -1067,21 +914,17 @@ When the descheduler decides to evict pods from a node, it employs the following
 * [Critical pods](https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/) (with priorityClassName set to system-cluster-critical or system-node-critical) are never evicted (unless `evictSystemCriticalPods: true` is set).
 * Pods (static or mirrored pods or standalone pods) not part of an ReplicationController, ReplicaSet(Deployment), StatefulSet, or Job are
 never evicted because these pods won't be recreated. (Standalone pods in failed status phase can be evicted by setting `evictFailedBarePods: true`)
-* Pods associated with DaemonSets are never evicted (unless `evictDaemonSetPods: true` is set).
+* Pods associated with DaemonSets are never evicted.
 * Pods with local storage are never evicted (unless `evictLocalStoragePods: true` is set).
 * Pods with PVCs are evicted (unless `ignorePvcPods: true` is set).
 * In `LowNodeUtilization` and `RemovePodsViolatingInterPodAntiAffinity`, pods are evicted by their priority from low to high, and if they have same priority,
 best effort pods are evicted before burstable and guaranteed pods.
-* All types of pods with the `descheduler.alpha.kubernetes.io/evict` annotation are eligible for eviction. This
+* All types of pods with the annotation `descheduler.alpha.kubernetes.io/evict` are eligible for eviction. This
   annotation is used to override checks which prevent eviction and users can select which pod is evicted.
   Users should know how and if the pod will be recreated.
   The annotation only affects internal descheduler checks.
   The anti-disruption protection provided by the [/eviction](https://kubernetes.io/docs/concepts/scheduling-eviction/api-eviction/)
   subresource is still respected.
-* Pods with the `descheduler.alpha.kubernetes.io/prefer-no-eviction` annotation voice their preference not to be evicted.
-  Each plugin decides whether the annotation gets respected or not. When the `DefaultEvictor` plugin sets `noEvictionPolicy`
-  to `Mandatory` all such pods are excluded from eviction. Needs to be used with caution as some plugins may enfore
-  various policies that are expected to be always met.
 * Pods with a non-nil DeletionTimestamp are not evicted by default.
 
 Setting `--v=4` or greater on the Descheduler will log all reasons why any pod is not evictable.
@@ -1110,15 +953,10 @@ To get best results from HA mode some additional configurations might require:
 
 ## Metrics
 
-| name	                                 | type	        | description                                                                       |
-|---------------------------------------|--------------|-----------------------------------------------------------------------------------|
-| build_info                            | 	gauge       | 	constant 1                                                                       |
-| pods_evicted                          | CounterVec   | total number of pods evicted, is deprecated in version v0.34.0                    |
-| pods_evicted_total                    | CounterVec   | total number of pods evicted                                                      |
-| descheduler_loop_duration_seconds     | HistogramVec | time taken to complete a whole descheduling cycle (support _bucket, _sum, _count), is deprecated in version v0.34.0  |
-| loop_duration_seconds                 | HistogramVec | time taken to complete a whole descheduling cycle (support _bucket, _sum, _count) |
-| descheduler_strategy_duration_seconds | HistogramVec | time taken to complete each stragtegy of descheduling operation (support _bucket, _sum, _count), is deprecated in version v0.34.0  |
-| strategy_duration_seconds             | HistogramVec | time taken to complete each stragtegy of descheduling operation (support _bucket, _sum, _count) |
+| name	| type	| description |
+|-------|-------|----------------|
+| build_info |	gauge |	constant 1 |
+| pods_evicted | CounterVec | total number of pods evicted |
 
 The metrics are served through https://localhost:10258/metrics by default.
 The address and port can be changed by setting `--binding-address` and `--secure-port` flags.
@@ -1134,13 +972,6 @@ packages that it is compiled with.
 
 | Descheduler | Supported Kubernetes Version |
 |-------------|------------------------------|
-| v0.34       | v1.34                        |
-| v0.33       | v1.33                        |
-| v0.32       | v1.32                        |
-| v0.31       | v1.31                        |
-| v0.30       | v1.30                        |
-| v0.29       | v1.29                        |
-| v0.28       | v1.28                        |
 | v0.27       | v1.27                        |
 | v0.26       | v1.26                        |
 | v0.25       | v1.25                        |
@@ -1178,7 +1009,7 @@ that the only people who can get things done around here are the "maintainers".
 We also would love to add more "official" maintainers, so show us what you can
 do!
 
-This repository uses the Kubernetes bots. See a full list of the commands [here](https://go.k8s.io/bot-commands).
+This repository uses the Kubernetes bots. See a full list of the commands [here][prow].
 
 ### Communicating With Contributors
 

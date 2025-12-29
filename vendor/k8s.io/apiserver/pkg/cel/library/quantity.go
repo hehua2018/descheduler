@@ -22,7 +22,6 @@ import (
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
-
 	"k8s.io/apimachinery/pkg/api/resource"
 	apiservercel "k8s.io/apiserver/pkg/cel"
 )
@@ -141,18 +140,6 @@ func Quantity() cel.EnvOption {
 var quantityLib = &quantity{}
 
 type quantity struct{}
-
-func (*quantity) LibraryName() string {
-	return "kubernetes.quantity"
-}
-
-func (*quantity) Types() []*cel.Type {
-	return []*cel.Type{apiservercel.QuantityType}
-}
-
-func (*quantity) declarations() map[string][]cel.FunctionOpt {
-	return quantityLibraryDecls
-}
 
 var quantityLibraryDecls = map[string][]cel.FunctionOpt{
 	"quantity": {

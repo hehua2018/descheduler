@@ -17,10 +17,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	utilptr "k8s.io/utils/ptr"
+	"k8s.io/utils/pointer"
 	"sigs.k8s.io/descheduler/pkg/api"
 )
 
@@ -36,14 +35,12 @@ func TestSetDefaults_DefaultEvictorArgs(t *testing.T) {
 			want: &DefaultEvictorArgs{
 				NodeSelector:            "",
 				EvictLocalStoragePods:   false,
-				EvictDaemonSetPods:      false,
 				EvictSystemCriticalPods: false,
 				IgnorePvcPods:           false,
 				EvictFailedBarePods:     false,
 				LabelSelector:           nil,
 				PriorityThreshold:       nil,
 				NodeFit:                 false,
-				IgnorePodsWithoutPDB:    false,
 			},
 		},
 		{
@@ -51,30 +48,26 @@ func TestSetDefaults_DefaultEvictorArgs(t *testing.T) {
 			in: &DefaultEvictorArgs{
 				NodeSelector:            "NodeSelector",
 				EvictLocalStoragePods:   true,
-				EvictDaemonSetPods:      true,
 				EvictSystemCriticalPods: true,
 				IgnorePvcPods:           true,
 				EvictFailedBarePods:     true,
 				LabelSelector:           nil,
 				PriorityThreshold: &api.PriorityThreshold{
-					Value: utilptr.To[int32](800),
+					Value: pointer.Int32(800),
 				},
-				NodeFit:              true,
-				IgnorePodsWithoutPDB: true,
+				NodeFit: true,
 			},
 			want: &DefaultEvictorArgs{
 				NodeSelector:            "NodeSelector",
 				EvictLocalStoragePods:   true,
-				EvictDaemonSetPods:      true,
 				EvictSystemCriticalPods: true,
 				IgnorePvcPods:           true,
 				EvictFailedBarePods:     true,
 				LabelSelector:           nil,
 				PriorityThreshold: &api.PriorityThreshold{
-					Value: utilptr.To[int32](800),
+					Value: pointer.Int32(800),
 				},
-				NodeFit:              true,
-				IgnorePodsWithoutPDB: true,
+				NodeFit: true,
 			},
 		},
 	}

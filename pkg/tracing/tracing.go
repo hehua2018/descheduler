@@ -27,7 +27,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/credentials"
 	"k8s.io/klog/v2"
@@ -110,12 +110,6 @@ func NewTracerProvider(ctx context.Context, endpoint, caCert, name, namespace st
 		opts = append(opts, otlptracegrpc.WithInsecure())
 	}
 
-	if os.Getenv("USER") == "" {
-		if err := os.Setenv("USER", "descheduler"); err != nil {
-			klog.ErrorS(err, "failed to set USER environment variable")
-		}
-	}
-
 	client := otlptracegrpc.NewClient(opts...)
 
 	exporter, err := otlptrace.New(ctx, client)
@@ -127,7 +121,7 @@ func NewTracerProvider(ctx context.Context, endpoint, caCert, name, namespace st
 		klog.V(5).InfoS("no name provided, using default service name for tracing", "name", DefaultServiceName)
 		name = DefaultServiceName
 	}
-	resourceOpts := defaultResourceOpts(name)
+	resourceOpts := []sdkresource.Option{sdkresource.WithAttributes(semconv.ServiceNameKey.String(name)), sdkresource.WithSchemaURL(semconv.SchemaURL), sdkresource.WithProcess()}
 	if namespace != "" {
 		resourceOpts = append(resourceOpts, sdkresource.WithAttributes(semconv.ServiceNamespaceKey.String(namespace)))
 	}
@@ -145,10 +139,6 @@ func NewTracerProvider(ctx context.Context, endpoint, caCert, name, namespace st
 	)
 	klog.V(2).Info("Successfully setup trace provider")
 	return
-}
-
-func defaultResourceOpts(name string) []sdkresource.Option {
-	return []sdkresource.Option{sdkresource.WithAttributes(semconv.ServiceNameKey.String(name)), sdkresource.WithSchemaURL(semconv.SchemaURL), sdkresource.WithProcess()}
 }
 
 // Shutdown shuts down the global trace exporter.

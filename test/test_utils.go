@@ -25,20 +25,49 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/fake"
-	clientgotesting "k8s.io/client-go/testing"
-	"k8s.io/metrics/pkg/apis/metrics/v1beta1"
-	utilptr "k8s.io/utils/ptr"
+	utilpointer "k8s.io/utils/pointer"
 )
+
+func BuildTestDeployment(name, namespace string, replicas int32, labels map[string]string, apply func(deployment *appsv1.Deployment)) *appsv1.Deployment {
+	// Add "name": name to the labels, overwriting if it exists.
+	labels["name"] = name
+
+	deployment := &appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Deployment",
+			APIVersion: "apps/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: utilpointer.Int32(replicas),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"name": name,
+				},
+			},
+			Template: v1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+				},
+				Spec: MakePodSpec("", utilpointer.Int64(0)),
+			},
+		},
+	}
+
+	if apply != nil {
+		apply(deployment)
+	}
+
+	return deployment
+}
 
 // BuildTestPod creates a test pod with given parameters.
 func BuildTestPod(name string, cpu, memory int64, nodeName string, apply func(*v1.Pod)) *v1.Pod {
@@ -47,7 +76,6 @@ func BuildTestPod(name string, cpu, memory int64, nodeName string, apply func(*v
 			Namespace: "default",
 			Name:      name,
 			SelfLink:  fmt.Sprintf("/api/v1/namespaces/default/pods/%s", name),
-			UID:       uuid.NewUUID(),
 		},
 		Spec: v1.PodSpec{
 			Containers: []v1.Container{
@@ -71,64 +99,6 @@ func BuildTestPod(name string, cpu, memory int64, nodeName string, apply func(*v
 		apply(pod)
 	}
 	return pod
-}
-
-func BuildTestPDB(name, appLabel string) *policyv1.PodDisruptionBudget {
-	maxUnavailable := intstr.FromInt32(1)
-	pdb := &policyv1.PodDisruptionBudget{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default",
-			Name:      name,
-		},
-		Spec: policyv1.PodDisruptionBudgetSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app": appLabel,
-				},
-			},
-			MaxUnavailable: &maxUnavailable,
-		},
-	}
-	return pdb
-}
-
-func BuildTestPVC(name, storageClass string) *v1.PersistentVolumeClaim {
-	pvc := &v1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default",
-			Name:      name,
-		},
-		Spec: v1.PersistentVolumeClaimSpec{
-			AccessModes:      []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-			StorageClassName: &storageClass,
-			Resources: v1.VolumeResourceRequirements{
-				Requests: v1.ResourceList{
-					v1.ResourceStorage: resource.MustParse("1Gi"),
-				},
-			},
-		},
-	}
-	return pvc
-}
-
-// BuildPodMetrics creates a test podmetrics with given parameters.
-func BuildPodMetrics(name string, millicpu, mem int64) *v1beta1.PodMetrics {
-	return &v1beta1.PodMetrics{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: "default",
-		},
-		Window: metav1.Duration{Duration: 20010000000},
-		Containers: []v1beta1.ContainerMetrics{
-			{
-				Name: "container-1",
-				Usage: v1.ResourceList{
-					v1.ResourceCPU:    *resource.NewMilliQuantity(millicpu, resource.DecimalSI),
-					v1.ResourceMemory: *resource.NewQuantity(mem, resource.BinarySI),
-				},
-			},
-		},
-	}
 }
 
 // GetMirrorPodAnnotation returns the annotation needed for mirror pod.
@@ -199,16 +169,42 @@ func BuildTestNode(name string, millicpu, mem, pods int64, apply func(*v1.Node))
 	return node
 }
 
-func BuildNodeMetrics(name string, millicpu, mem int64) *v1beta1.NodeMetrics {
-	return &v1beta1.NodeMetrics{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
+func MakePodSpec(priorityClassName string, gracePeriod *int64) v1.PodSpec {
+	return v1.PodSpec{
+		SecurityContext: &v1.PodSecurityContext{
+			RunAsNonRoot: utilpointer.Bool(true),
+			RunAsUser:    utilpointer.Int64(1000),
+			RunAsGroup:   utilpointer.Int64(1000),
+			SeccompProfile: &v1.SeccompProfile{
+				Type: v1.SeccompProfileTypeRuntimeDefault,
+			},
 		},
-		Window: metav1.Duration{Duration: 20010000000},
-		Usage: v1.ResourceList{
-			v1.ResourceCPU:    *resource.NewMilliQuantity(millicpu, resource.DecimalSI),
-			v1.ResourceMemory: *resource.NewQuantity(mem, resource.BinarySI),
-		},
+		Containers: []v1.Container{{
+			Name:            "pause",
+			ImagePullPolicy: "Never",
+			Image:           "registry.k8s.io/pause",
+			Ports:           []v1.ContainerPort{{ContainerPort: 80}},
+			Resources: v1.ResourceRequirements{
+				Limits: v1.ResourceList{
+					v1.ResourceCPU:    resource.MustParse("100m"),
+					v1.ResourceMemory: resource.MustParse("200Mi"),
+				},
+				Requests: v1.ResourceList{
+					v1.ResourceCPU:    resource.MustParse("100m"),
+					v1.ResourceMemory: resource.MustParse("100Mi"),
+				},
+			},
+			SecurityContext: &v1.SecurityContext{
+				AllowPrivilegeEscalation: utilpointer.Bool(false),
+				Capabilities: &v1.Capabilities{
+					Drop: []v1.Capability{
+						"ALL",
+					},
+				},
+			},
+		}},
+		PriorityClassName:             priorityClassName,
+		TerminationGracePeriodSeconds: gracePeriod,
 	}
 }
 
@@ -252,28 +248,9 @@ func SetNormalOwnerRef(pod *v1.Pod) {
 	pod.ObjectMeta.OwnerReferences = GetNormalPodOwnerRefList()
 }
 
-// SetMirrorPodAnnotation sets the given pod's annotations to mirror pod annotations
-func SetMirrorPodAnnotation(pod *v1.Pod) {
-	pod.Annotations = GetMirrorPodAnnotation()
-}
-
 // SetPodPriority sets the given pod's priority
 func SetPodPriority(pod *v1.Pod, priority int32) {
 	pod.Spec.Priority = &priority
-}
-
-func SetHostPathEmptyDirVolumeSource(pod *v1.Pod) {
-	pod.Spec.Volumes = []v1.Volume{
-		{
-			Name: "sample",
-			VolumeSource: v1.VolumeSource{
-				HostPath: &v1.HostPathVolumeSource{Path: "somePath"},
-				EmptyDir: &v1.EmptyDirVolumeSource{
-					SizeLimit: resource.NewQuantity(int64(10), resource.BinarySI),
-				},
-			},
-		},
-	}
 }
 
 // SetNodeUnschedulable sets the given node unschedulable
@@ -295,7 +272,7 @@ func SetNodeExtendedResource(node *v1.Node, resourceName v1.ResourceName, reques
 func DeleteDeployment(ctx context.Context, t *testing.T, clientSet clientset.Interface, deployment *appsv1.Deployment) {
 	// set number of replicas to 0
 	deploymentCopy := deployment.DeepCopy()
-	deploymentCopy.Spec.Replicas = utilptr.To[int32](0)
+	deploymentCopy.Spec.Replicas = utilpointer.Int32(0)
 	if _, err := clientSet.AppsV1().Deployments(deploymentCopy.Namespace).Update(ctx, deploymentCopy, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("Error updating replica controller %v", err)
 	}
@@ -337,44 +314,26 @@ func DeleteDeployment(ctx context.Context, t *testing.T, clientSet clientset.Int
 	}
 }
 
-func SetPodAntiAffinity(inputPod *v1.Pod, labelKey, labelValue string) {
-	inputPod.Spec.Affinity = &v1.Affinity{
-		PodAntiAffinity: &v1.PodAntiAffinity{
-			RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{
-				{
-					LabelSelector: &metav1.LabelSelector{
-						MatchExpressions: []metav1.LabelSelectorRequirement{
-							{
-								Key:      labelKey,
-								Operator: metav1.LabelSelectorOpIn,
-								Values:   []string{labelValue},
-							},
-						},
-					},
-					TopologyKey: "region",
-				},
-			},
-		},
-	}
-}
-
-func PodWithPodAntiAffinity(inputPod *v1.Pod, labelKey, labelValue string) *v1.Pod {
-	SetPodAntiAffinity(inputPod, labelKey, labelValue)
-	inputPod.Labels = map[string]string{labelKey: labelValue}
-	return inputPod
-}
-
-func RegisterEvictedPodsCollector(fakeClient *fake.Clientset, evictedPods *[]string) {
-	fakeClient.PrependReactor("create", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
-		if action.GetSubresource() == "eviction" {
-			createAct, matched := action.(clientgotesting.CreateActionImpl)
-			if !matched {
-				return false, nil, fmt.Errorf("unable to convert action to core.CreateActionImpl")
-			}
-			if eviction, matched := createAct.Object.(*policyv1.Eviction); matched {
-				*evictedPods = append(*evictedPods, eviction.GetName())
+func WaitForDeploymentPodsRunning(ctx context.Context, t *testing.T, clientSet clientset.Interface, deployment *appsv1.Deployment) {
+	if err := wait.PollUntilContextTimeout(ctx, 5*time.Second, 30*time.Second, true, func(c context.Context) (bool, error) {
+		podList, err := clientSet.CoreV1().Pods(deployment.Namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labels.SelectorFromSet(deployment.Spec.Template.ObjectMeta.Labels).String(),
+		})
+		if err != nil {
+			return false, err
+		}
+		if len(podList.Items) != int(*deployment.Spec.Replicas) {
+			t.Logf("Waiting for %v pods to be created, got %v instead", *deployment.Spec.Replicas, len(podList.Items))
+			return false, nil
+		}
+		for _, pod := range podList.Items {
+			if pod.Status.Phase != v1.PodRunning {
+				t.Logf("Pod %v not running yet, is %v instead", pod.Name, pod.Status.Phase)
+				return false, nil
 			}
 		}
-		return false, nil, nil // fallback to the default reactor
-	})
+		return true, nil
+	}); err != nil {
+		t.Fatalf("Error waiting for pods running: %v", err)
+	}
 }

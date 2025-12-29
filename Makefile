@@ -26,13 +26,11 @@ ARCHS = amd64 arm arm64
 
 LDFLAGS=-ldflags "-X ${LDFLAG_LOCATION}.version=${VERSION} -X ${LDFLAG_LOCATION}.buildDate=${BUILD} -X ${LDFLAG_LOCATION}.gitbranch=${BRANCH} -X ${LDFLAG_LOCATION}.gitsha1=${SHA1}"
 
-GOLANGCI_VERSION := v1.64.8
+GOLANGCI_VERSION := v1.52.1
 HAS_GOLANGCI := $(shell ls _output/bin/golangci-lint 2> /dev/null)
 
-GOFUMPT_VERSION := v0.7.0
+GOFUMPT_VERSION := v0.4.0
 HAS_GOFUMPT := $(shell command -v gofumpt 2> /dev/null)
-
-GO_VERSION := $(shell (command -v jq > /dev/null && (go mod edit -json | jq -r .Go)) || (sed -En 's/^go (.*)$$/\1/p' go.mod))
 
 # REGISTRY is the container registry to push
 # into. The default is to push to the staging
@@ -136,7 +134,7 @@ gen:
 	./hack/update-docs.sh
 
 gen-docker:
-	$(CONTAINER_ENGINE) run --entrypoint make -it -v $(CURRENT_DIR):/go/src/sigs.k8s.io/descheduler -w /go/src/sigs.k8s.io/descheduler golang:$(GO_VERSION) gen
+	$(CONTAINER_ENGINE) run --entrypoint make -it -v $(CURRENT_DIR):/go/src/sigs.k8s.io/descheduler -w /go/src/sigs.k8s.io/descheduler golang:1.20.7 gen
 
 verify-gen:
 	./hack/verify-conversions.sh
@@ -148,7 +146,7 @@ lint:
 ifndef HAS_GOLANGCI
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b ./_output/bin ${GOLANGCI_VERSION}
 endif
-	./_output/bin/golangci-lint run -v
+	./_output/bin/golangci-lint run
 
 fmt:
 ifndef HAS_GOFUMPT

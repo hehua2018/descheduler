@@ -29,18 +29,17 @@ import (
 	systemd "github.com/coreos/go-systemd/v22/daemon"
 
 	"golang.org/x/time/rate"
-	apidiscoveryv2 "k8s.io/api/apidiscovery/v2"
+	apidiscoveryv2beta1 "k8s.io/api/apidiscovery/v2beta1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	"k8s.io/apimachinery/pkg/runtime/serializer/cbor"
 	"k8s.io/apimachinery/pkg/util/managedfields"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	utilwaitgroup "k8s.io/apimachinery/pkg/util/waitgroup"
+	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/audit"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
@@ -54,10 +53,6 @@ import (
 	"k8s.io/apiserver/pkg/storageversion"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	restclient "k8s.io/client-go/rest"
-	basecompatibility "k8s.io/component-base/compatibility"
-	"k8s.io/component-base/featuregate"
-	zpagesfeatures "k8s.io/component-base/zpages/features"
-	"k8s.io/component-base/zpages/statusz"
 	"k8s.io/klog/v2"
 	openapibuilder3 "k8s.io/kube-openapi/pkg/builder3"
 	openapicommon "k8s.io/kube-openapi/pkg/common"
@@ -65,6 +60,7 @@ import (
 	"k8s.io/kube-openapi/pkg/handler3"
 	openapiutil "k8s.io/kube-openapi/pkg/util"
 	"k8s.io/kube-openapi/pkg/validation/spec"
+	"k8s.io/utils/clock"
 )
 
 // Info about an API group.
@@ -162,7 +158,7 @@ type GenericAPIServer struct {
 	openAPIConfig *openapicommon.Config
 
 	// Enable swagger and/or OpenAPI V3 if these configs are non-nil.
-	openAPIV3Config *openapicommon.OpenAPIV3Config
+	openAPIV3Config *openapicommon.Config
 
 	// SkipOpenAPIInstallation indicates not to install the OpenAPI handler
 	// during PrepareRun.
@@ -195,11 +191,19 @@ type GenericAPIServer struct {
 	preShutdownHooksCalled bool
 
 	// healthz checks
-	healthzRegistry healthCheckRegistry
-	readyzRegistry  healthCheckRegistry
-	livezRegistry   healthCheckRegistry
-
-	livezGracePeriod time.Duration
+	healthzLock            sync.Mutex
+	healthzChecks          []healthz.HealthChecker
+	healthzChecksInstalled bool
+	// livez checks
+	livezLock            sync.Mutex
+	livezChecks          []healthz.HealthChecker
+	livezChecksInstalled bool
+	// readyz checks
+	readyzLock            sync.Mutex
+	readyzChecks          []healthz.HealthChecker
+	readyzChecksInstalled bool
+	livezGracePeriod      time.Duration
+	livezClock            clock.Clock
 
 	// auditing. The backend is started before the server starts listening.
 	AuditBackend audit.Backend
@@ -237,29 +241,11 @@ type GenericAPIServer struct {
 	// APIServerID is the ID of this API server
 	APIServerID string
 
-	// StorageReadinessHook implements post-start-hook functionality for checking readiness
-	// of underlying storage for registered resources.
-	StorageReadinessHook *StorageReadinessHook
-
 	// StorageVersionManager holds the storage versions of the API resources installed by this server.
 	StorageVersionManager storageversion.Manager
 
-	// EffectiveVersion determines which apis and features are available
-	// based on when the api/feature lifecyle.
-	EffectiveVersion basecompatibility.EffectiveVersion
-	// EmulationForwardCompatible is an option to implicitly enable all APIs which are introduced after the emulation version and
-	// have higher priority than APIs of the same group resource enabled at the emulation version.
-	// If true, all APIs that have higher priority than the APIs(beta+) of the same group resource enabled at the emulation version will be installed.
-	// This is needed when a controller implementation migrates to newer API versions, for the binary version, and also uses the newer API versions even when emulation version is set.
-	// Not applicable to alpha APIs.
-	EmulationForwardCompatible bool
-	// RuntimeConfigEmulationForwardCompatible is an option to explicitly enable specific APIs introduced after the emulation version through the runtime-config.
-	// If true, APIs identified by group/version that are enabled in the --runtime-config flag will be installed even if it is introduced after the emulation version. --runtime-config flag values that identify multiple APIs, such as api/all,api/ga,api/beta, are not influenced by this flag and will only enable APIs available at the current emulation version.
-	// If false, error would be thrown if any GroupVersion or GroupVersionResource explicitly enabled in the --runtime-config flag is introduced after the emulation version.
-	RuntimeConfigEmulationForwardCompatible bool
-
-	// FeatureGate is a way to plumb feature gate through if you have them.
-	FeatureGate featuregate.FeatureGate
+	// Version will enable the /version endpoint if non-nil
+	Version *version.Info
 
 	// lifecycleSignals provides access to the various signals that happen during the life cycle of the apiserver.
 	lifecycleSignals lifecycleSignals
@@ -344,7 +330,7 @@ func (s *GenericAPIServer) PreShutdownHooks() map[string]preShutdownHookEntry {
 	return s.preShutdownHooks
 }
 func (s *GenericAPIServer) HealthzChecks() []healthz.HealthChecker {
-	return s.healthzRegistry.checks
+	return s.healthzChecks
 }
 func (s *GenericAPIServer) ListedPaths() []string {
 	return s.listedPathProvider.ListedPaths()
@@ -444,9 +430,11 @@ func (s *GenericAPIServer) PrepareRun() preparedGenericAPIServer {
 	}
 
 	if s.openAPIV3Config != nil && !s.skipOpenAPIInstallation {
-		s.OpenAPIV3VersionedService = routes.OpenAPI{
-			V3Config: s.openAPIV3Config,
-		}.InstallV3(s.Handler.GoRestfulContainer, s.Handler.NonGoRestfulMux)
+		if utilfeature.DefaultFeatureGate.Enabled(features.OpenAPIV3) {
+			s.OpenAPIV3VersionedService = routes.OpenAPI{
+				Config: s.openAPIV3Config,
+			}.InstallV3(s.Handler.GoRestfulContainer, s.Handler.NonGoRestfulMux)
+		}
 	}
 
 	s.installHealthz()
@@ -460,28 +448,14 @@ func (s *GenericAPIServer) PrepareRun() preparedGenericAPIServer {
 	}
 	s.installReadyz()
 
-	if utilfeature.DefaultFeatureGate.Enabled(zpagesfeatures.ComponentStatusz) {
-		statusz.Install(s.Handler.NonGoRestfulMux, "apiserver", statusz.NewRegistry(s.EffectiveVersion, statusz.WithListedPaths(s.ListedPaths())))
-	}
-
 	return preparedGenericAPIServer{s}
 }
 
 // Run spawns the secure http server. It only returns if stopCh is closed
 // or the secure port cannot be listened on initially.
+// This is the diagram of what channels/signals are dependent on each other:
 //
-// Deprecated: use RunWithContext instead. Run will not get removed to avoid
-// breaking consumers, but should not be used in new code.
-func (s preparedGenericAPIServer) Run(stopCh <-chan struct{}) error {
-	ctx := wait.ContextForChannel(stopCh)
-	return s.RunWithContext(ctx)
-}
-
-// RunWithContext spawns the secure http server. It only returns if ctx is canceled
-// or the secure port cannot be listened on initially.
-// This is the diagram of what contexts/channels/signals are dependent on each other:
-//
-// |                                   ctx
+// |                                  stopCh
 // |                                    |
 // |           ---------------------------------------------------------
 // |           |                                                       |
@@ -514,13 +488,12 @@ func (s preparedGenericAPIServer) Run(stopCh <-chan struct{}) error {
 // |           |                                         |                                        |
 // |           |-------------------|---------------------|----------------------------------------|
 // |                               |                     |
-// |                       stopHttpServerCtx     (AuditBackend::Shutdown())
+// |                       stopHttpServerCh     (AuditBackend::Shutdown())
 // |                               |
 // |                       listenerStoppedCh
 // |                               |
 // |      HTTPServerStoppedListening (httpServerStoppedListeningCh)
-func (s preparedGenericAPIServer) RunWithContext(ctx context.Context) error {
-	stopCh := ctx.Done()
+func (s preparedGenericAPIServer) Run(stopCh <-chan struct{}) error {
 	delayedStopCh := s.lifecycleSignals.AfterShutdownDelayDuration
 	shutdownInitiatedCh := s.lifecycleSignals.ShutdownInitiated
 
@@ -582,11 +555,9 @@ func (s preparedGenericAPIServer) RunWithContext(ctx context.Context) error {
 
 	notAcceptingNewRequestCh := s.lifecycleSignals.NotAcceptingNewRequest
 	drainedCh := s.lifecycleSignals.InFlightRequestsDrained
-	// Canceling the parent context does not immediately cancel the HTTP server.
-	// We only inherit context values here and deal with cancellation ourselves.
-	stopHTTPServerCtx, stopHTTPServer := context.WithCancelCause(context.WithoutCancel(ctx))
+	stopHttpServerCh := make(chan struct{})
 	go func() {
-		defer stopHTTPServer(errors.New("time to stop HTTP server"))
+		defer close(stopHttpServerCh)
 
 		timeToStopHttpServerCh := notAcceptingNewRequestCh.Signaled()
 		if s.ShutdownSendRetryAfter {
@@ -605,7 +576,7 @@ func (s preparedGenericAPIServer) RunWithContext(ctx context.Context) error {
 		}
 	}
 
-	stoppedCh, listenerStoppedCh, err := s.NonBlockingRunWithContext(stopHTTPServerCtx, shutdownTimeout)
+	stoppedCh, listenerStoppedCh, err := s.NonBlockingRun(stopHttpServerCh, shutdownTimeout)
 	if err != nil {
 		return err
 	}
@@ -734,18 +705,7 @@ func (s preparedGenericAPIServer) RunWithContext(ctx context.Context) error {
 // NonBlockingRun spawns the secure http server. An error is
 // returned if the secure port cannot be listened on.
 // The returned channel is closed when the (asynchronous) termination is finished.
-//
-// Deprecated: use RunWithContext instead. Run will not get removed to avoid
-// breaking consumers, but should not be used in new code.
 func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}, shutdownTimeout time.Duration) (<-chan struct{}, <-chan struct{}, error) {
-	ctx := wait.ContextForChannel(stopCh)
-	return s.NonBlockingRunWithContext(ctx, shutdownTimeout)
-}
-
-// NonBlockingRunWithContext spawns the secure http server. An error is
-// returned if the secure port cannot be listened on.
-// The returned channel is closed when the (asynchronous) termination is finished.
-func (s preparedGenericAPIServer) NonBlockingRunWithContext(ctx context.Context, shutdownTimeout time.Duration) (<-chan struct{}, <-chan struct{}, error) {
 	// Use an internal stop channel to allow cleanup of the listeners on error.
 	internalStopCh := make(chan struct{})
 	var stoppedCh <-chan struct{}
@@ -763,11 +723,11 @@ func (s preparedGenericAPIServer) NonBlockingRunWithContext(ctx context.Context,
 	// responsibility of the caller to close the provided channel to
 	// ensure cleanup.
 	go func() {
-		<-ctx.Done()
+		<-stopCh
 		close(internalStopCh)
 	}()
 
-	s.RunPostStartHooks(ctx)
+	s.RunPostStartHooks(stopCh)
 
 	if _, err := systemd.SdNotify(true, "READY=1\n"); err != nil {
 		klog.Errorf("Unable to send systemd daemon successful start message: %v\n", err)
@@ -802,34 +762,36 @@ func (s *GenericAPIServer) installAPIResources(apiPrefix string, apiGroupInfo *A
 		}
 		resourceInfos = append(resourceInfos, r...)
 
-		// Aggregated discovery only aggregates resources under /apis
-		if apiPrefix == APIGroupPrefix {
-			s.AggregatedDiscoveryGroupManager.AddGroupVersion(
-				groupVersion.Group,
-				apidiscoveryv2.APIVersionDiscovery{
-					Freshness: apidiscoveryv2.DiscoveryFreshnessCurrent,
-					Version:   groupVersion.Version,
-					Resources: discoveryAPIResources,
-				},
-			)
-		} else {
-			// There is only one group version for legacy resources, priority can be defaulted to 0.
-			s.AggregatedLegacyDiscoveryGroupManager.AddGroupVersion(
-				groupVersion.Group,
-				apidiscoveryv2.APIVersionDiscovery{
-					Freshness: apidiscoveryv2.DiscoveryFreshnessCurrent,
-					Version:   groupVersion.Version,
-					Resources: discoveryAPIResources,
-				},
-			)
+		if utilfeature.DefaultFeatureGate.Enabled(features.AggregatedDiscoveryEndpoint) {
+			// Aggregated discovery only aggregates resources under /apis
+			if apiPrefix == APIGroupPrefix {
+				s.AggregatedDiscoveryGroupManager.AddGroupVersion(
+					groupVersion.Group,
+					apidiscoveryv2beta1.APIVersionDiscovery{
+						Freshness: apidiscoveryv2beta1.DiscoveryFreshnessCurrent,
+						Version:   groupVersion.Version,
+						Resources: discoveryAPIResources,
+					},
+				)
+			} else {
+				// There is only one group version for legacy resources, priority can be defaulted to 0.
+				s.AggregatedLegacyDiscoveryGroupManager.AddGroupVersion(
+					groupVersion.Group,
+					apidiscoveryv2beta1.APIVersionDiscovery{
+						Freshness: apidiscoveryv2beta1.DiscoveryFreshnessCurrent,
+						Version:   groupVersion.Version,
+						Resources: discoveryAPIResources,
+					},
+				)
+			}
 		}
 
 	}
 
 	s.RegisterDestroyFunc(apiGroupInfo.destroyStorage)
 
-	if s.FeatureGate.Enabled(features.StorageVersionAPI) &&
-		s.FeatureGate.Enabled(features.APIServerIdentity) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.StorageVersionAPI) &&
+		utilfeature.DefaultFeatureGate.Enabled(features.APIServerIdentity) {
 		// API installation happens before we start listening on the handlers,
 		// therefore it is safe to register ResourceInfos here. The handler will block
 		// write requests until the storage versions of the targeting resources are updated.
@@ -859,9 +821,12 @@ func (s *GenericAPIServer) InstallLegacyAPIGroup(apiPrefix string, apiGroupInfo 
 	// Install the version handler.
 	// Add a handler at /<apiPrefix> to enumerate the supported api versions.
 	legacyRootAPIHandler := discovery.NewLegacyRootAPIHandler(s.discoveryAddresses, s.Serializer, apiPrefix)
-	wrapped := discoveryendpoint.WrapAggregatedDiscoveryToHandler(legacyRootAPIHandler, s.AggregatedLegacyDiscoveryGroupManager)
-	s.Handler.GoRestfulContainer.Add(wrapped.GenerateWebService("/api", metav1.APIVersions{}))
-	s.registerStorageReadinessCheck("", apiGroupInfo)
+	if utilfeature.DefaultFeatureGate.Enabled(features.AggregatedDiscoveryEndpoint) {
+		wrapped := discoveryendpoint.WrapAggregatedDiscoveryToHandler(legacyRootAPIHandler, s.AggregatedLegacyDiscoveryGroupManager)
+		s.Handler.GoRestfulContainer.Add(wrapped.GenerateWebService("/api", metav1.APIVersions{}))
+	} else {
+		s.Handler.GoRestfulContainer.Add(legacyRootAPIHandler.WebService())
+	}
 
 	return nil
 }
@@ -920,26 +885,8 @@ func (s *GenericAPIServer) InstallAPIGroups(apiGroupInfos ...*APIGroupInfo) erro
 
 		s.DiscoveryGroupManager.AddGroup(apiGroup)
 		s.Handler.GoRestfulContainer.Add(discovery.NewAPIGroupHandler(s.Serializer, apiGroup).WebService())
-		s.registerStorageReadinessCheck(apiGroupInfo.PrioritizedVersions[0].Group, apiGroupInfo)
 	}
 	return nil
-}
-
-// registerStorageReadinessCheck registers the readiness checks for all underlying storages
-// for a given APIGroup.
-func (s *GenericAPIServer) registerStorageReadinessCheck(groupName string, apiGroupInfo *APIGroupInfo) {
-	for version, storageMap := range apiGroupInfo.VersionedResourcesStorageMap {
-		for resource, storage := range storageMap {
-			if withReadiness, ok := storage.(rest.StorageWithReadiness); ok {
-				gvr := metav1.GroupVersionResource{
-					Group:    groupName,
-					Version:  version,
-					Resource: resource,
-				}
-				s.StorageReadinessHook.RegisterStorage(gvr, withReadiness)
-			}
-		}
-	}
 }
 
 // InstallAPIGroup exposes the given api group in the API.
@@ -1002,19 +949,6 @@ func (s *GenericAPIServer) newAPIGroupVersion(apiGroupInfo *APIGroupInfo, groupV
 // NewDefaultAPIGroupInfo returns an APIGroupInfo stubbed with "normal" values
 // exposed for easier composition from other packages
 func NewDefaultAPIGroupInfo(group string, scheme *runtime.Scheme, parameterCodec runtime.ParameterCodec, codecs serializer.CodecFactory) APIGroupInfo {
-	opts := []serializer.CodecFactoryOptionsMutator{}
-	if utilfeature.DefaultFeatureGate.Enabled(features.CBORServingAndStorage) {
-		opts = append(opts, serializer.WithSerializer(cbor.NewSerializerInfo))
-	}
-	if utilfeature.DefaultFeatureGate.Enabled(features.StreamingCollectionEncodingToJSON) {
-		opts = append(opts, serializer.WithStreamingCollectionEncodingToJSON())
-	}
-	if utilfeature.DefaultFeatureGate.Enabled(features.StreamingCollectionEncodingToProtobuf) {
-		opts = append(opts, serializer.WithStreamingCollectionEncodingToProtobuf())
-	}
-	if len(opts) != 0 {
-		codecs = serializer.NewCodecFactory(scheme, opts...)
-	}
 	return APIGroupInfo{
 		PrioritizedVersions:          scheme.PrioritizedVersionsForGroup(group),
 		VersionedResourcesStorageMap: map[string]map[string]rest.Storage{},

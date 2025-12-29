@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:generate go run mkstdlib.go
+
 // Package imports implements a Go pretty-printer (like package "go/format")
 // that also adds or removes import statements as necessary.
 package imports
@@ -9,7 +11,6 @@ package imports
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"fmt"
 	"go/ast"
 	"go/format"
@@ -22,7 +23,6 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/ast/astutil"
-	"golang.org/x/tools/internal/event"
 )
 
 // Options is golang.org/x/tools/imports.Options with extra internal-only options.
@@ -66,17 +66,14 @@ func Process(filename string, src []byte, opt *Options) (formatted []byte, err e
 //
 // Note that filename's directory influences which imports can be chosen,
 // so it is important that filename be accurate.
-func FixImports(ctx context.Context, filename string, src []byte, opt *Options) (fixes []*ImportFix, err error) {
-	ctx, done := event.Start(ctx, "imports.FixImports")
-	defer done()
-
+func FixImports(filename string, src []byte, opt *Options) (fixes []*ImportFix, err error) {
 	fileSet := token.NewFileSet()
 	file, _, err := parse(fileSet, filename, src, opt)
 	if err != nil {
 		return nil, err
 	}
 
-	return getFixes(ctx, fileSet, file, filename, opt.Env)
+	return getFixes(fileSet, file, filename, opt.Env)
 }
 
 // ApplyFixes applies all of the fixes to the file and formats it. extraMode
@@ -86,7 +83,7 @@ func ApplyFixes(fixes []*ImportFix, filename string, src []byte, opt *Options, e
 	// Don't use parse() -- we don't care about fragments or statement lists
 	// here, and we need to work with unparseable files.
 	fileSet := token.NewFileSet()
-	parserMode := parser.SkipObjectResolution
+	parserMode := parser.Mode(0)
 	if opt.Comments {
 		parserMode |= parser.ParseComments
 	}
@@ -107,7 +104,7 @@ func ApplyFixes(fixes []*ImportFix, filename string, src []byte, opt *Options, e
 }
 
 // formatFile formats the file syntax tree.
-// It may mutate the token.FileSet and the ast.File.
+// It may mutate the token.FileSet.
 //
 // If an adjust function is provided, it is called after formatting
 // with the original source (formatFile's src parameter) and the
@@ -165,7 +162,7 @@ func formatFile(fset *token.FileSet, file *ast.File, src []byte, adjust func(ori
 // parse parses src, which was read from filename,
 // as a Go source file or statement list.
 func parse(fset *token.FileSet, filename string, src []byte, opt *Options) (*ast.File, func(orig, src []byte) []byte, error) {
-	var parserMode parser.Mode // legacy ast.Object resolution is required here
+	parserMode := parser.Mode(0)
 	if opt.Comments {
 		parserMode |= parser.ParseComments
 	}
@@ -234,7 +231,7 @@ func parse(fset *token.FileSet, filename string, src []byte, opt *Options) (*ast
 			src = src[:len(src)-len("}\n")]
 			// Gofmt has also indented the function body one level.
 			// Remove that indent.
-			src = bytes.ReplaceAll(src, []byte("\n\t"), []byte("\n"))
+			src = bytes.Replace(src, []byte("\n\t"), []byte("\n"), -1)
 			return matchSpace(orig, src)
 		}
 		return file, adjust, nil

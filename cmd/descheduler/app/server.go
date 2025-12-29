@@ -22,18 +22,20 @@ import (
 	"io"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"github.com/spf13/cobra"
+	"k8s.io/apiserver/pkg/server/healthz"
 
 	"sigs.k8s.io/descheduler/cmd/descheduler/app/options"
 	"sigs.k8s.io/descheduler/pkg/descheduler"
 	"sigs.k8s.io/descheduler/pkg/tracing"
 
+	"github.com/spf13/cobra"
+
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/apiserver/pkg/server/healthz"
+	apiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/server/mux"
+	restclient "k8s.io/client-go/rest"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/component-base/logs"
 	logsapi "k8s.io/component-base/logs/api/v1"
@@ -65,15 +67,39 @@ func NewDeschedulerCommand(out io.Writer) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err = s.Apply(); err != nil {
-				klog.ErrorS(err, "failed to apply")
+			// loopbackClientConfig is a config for a privileged loopback connection
+			var loopbackClientConfig *restclient.Config
+			var secureServing *apiserver.SecureServingInfo
+			if err := s.SecureServing.ApplyTo(&secureServing, &loopbackClientConfig); err != nil {
+				klog.ErrorS(err, "failed to apply secure server configuration")
 				return err
 			}
 
-			if err = Run(cmd.Context(), s); err != nil {
-				klog.ErrorS(err, "failed to run descheduler server")
+			secureServing.DisableHTTP2 = !s.EnableHTTP2
+
+			ctx, done := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+
+			pathRecorderMux := mux.NewPathRecorderMux("descheduler")
+			if !s.DisableMetrics {
+				pathRecorderMux.Handle("/metrics", legacyregistry.HandlerWithReset())
+			}
+
+			healthz.InstallHandler(pathRecorderMux, healthz.NamedCheck("Descheduler", healthz.PingHealthz.Check))
+
+			stoppedCh, _, err := secureServing.Serve(pathRecorderMux, 0, ctx.Done())
+			if err != nil {
+				klog.Fatalf("failed to start secure server: %v", err)
 				return err
 			}
+
+			if err = Run(ctx, s); err != nil {
+				klog.ErrorS(err, "descheduler server")
+				return err
+			}
+
+			done()
+			// wait for metrics server to close
+			<-stoppedCh
 
 			return nil
 		},
@@ -88,52 +114,14 @@ func NewDeschedulerCommand(out io.Writer) *cobra.Command {
 	return cmd
 }
 
-func Run(rootCtx context.Context, rs *options.DeschedulerServer) error {
-	ctx, done := signal.NotifyContext(rootCtx, syscall.SIGINT, syscall.SIGTERM)
-
-	pathRecorderMux := mux.NewPathRecorderMux("descheduler")
-	if !rs.DisableMetrics {
-		pathRecorderMux.Handle("/metrics", legacyregistry.HandlerWithReset())
-	}
-
-	healthz.InstallHandler(pathRecorderMux, healthz.NamedCheck("Descheduler", healthz.PingHealthz.Check))
-
-	var stoppedCh <-chan struct{}
-	var err error
-	if rs.SecureServingInfo != nil {
-		stoppedCh, _, err = rs.SecureServingInfo.Serve(pathRecorderMux, 0, ctx.Done())
-		if err != nil {
-			klog.Fatalf("failed to start secure server: %v", err)
-			return err
-		}
-	}
-
-	err = tracing.NewTracerProvider(ctx, rs.Tracing.CollectorEndpoint, rs.Tracing.TransportCert, rs.Tracing.ServiceName, rs.Tracing.ServiceNamespace, rs.Tracing.SampleRate, rs.Tracing.FallbackToNoOpProviderOnError)
-	if err != nil {
-		klog.ErrorS(err, "failed to create tracer provider")
-	}
-	defer func() {
-		// we give the tracing.Shutdown() its own context as the
-		// original context may have been cancelled already. we
-		// have arbitrarily chosen the timeout duration.
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		tracing.Shutdown(ctx)
-	}()
-
-	// increase the fake watch channel so the dry-run mode can be run
-	// over a cluster with thousands of pods
-	watch.DefaultChanSize = 100000
-	err = descheduler.Run(ctx, rs)
+func Run(ctx context.Context, rs *options.DeschedulerServer) error {
+	err := tracing.NewTracerProvider(ctx, rs.Tracing.CollectorEndpoint, rs.Tracing.TransportCert, rs.Tracing.ServiceName, rs.Tracing.ServiceNamespace, rs.Tracing.SampleRate, rs.Tracing.FallbackToNoOpProviderOnError)
 	if err != nil {
 		return err
 	}
-
-	done()
-	if stoppedCh != nil {
-		// wait for metrics server to close
-		<-stoppedCh
-	}
-
-	return nil
+	defer tracing.Shutdown(ctx)
+	// increase the fake watch channel so the dry-run mode can be run
+	// over a cluster with thousands of pods
+	watch.DefaultChanSize = 100000
+	return descheduler.Run(ctx, rs)
 }

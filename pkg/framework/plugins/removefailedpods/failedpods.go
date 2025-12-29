@@ -36,7 +36,6 @@ const PluginName = "RemoveFailedPods"
 
 // RemoveFailedPods evicts pods in failed status phase that match the given args criteria
 type RemoveFailedPods struct {
-	logger    klog.Logger
 	handle    frameworktypes.Handle
 	args      *RemoveFailedPodsArgs
 	podFilter podutil.FilterFunc
@@ -45,12 +44,11 @@ type RemoveFailedPods struct {
 var _ frameworktypes.DeschedulePlugin = &RemoveFailedPods{}
 
 // New builds plugin from its arguments while passing a handle
-func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle) (frameworktypes.Plugin, error) {
+func New(args runtime.Object, handle frameworktypes.Handle) (frameworktypes.Plugin, error) {
 	failedPodsArgs, ok := args.(*RemoveFailedPodsArgs)
 	if !ok {
 		return nil, fmt.Errorf("want args to be of type RemoveFailedPodsArgs, got %T", args)
 	}
-	logger := klog.FromContext(ctx).WithValues("plugin", PluginName)
 
 	var includedNamespaces, excludedNamespaces sets.Set[string]
 	if failedPodsArgs.Namespaces != nil {
@@ -73,7 +71,7 @@ func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle)
 
 	podFilter = podutil.WrapFilterFuncs(podFilter, func(pod *v1.Pod) bool {
 		if err := validateCanEvict(pod, failedPodsArgs); err != nil {
-			logger.V(4).Info(fmt.Sprintf("ignoring pod for eviction due to: %s", err.Error()), "pod", klog.KObj(pod))
+			klog.V(4).InfoS(fmt.Sprintf("ignoring pod for eviction due to: %s", err.Error()), "pod", klog.KObj(pod))
 			return false
 		}
 
@@ -81,7 +79,6 @@ func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle)
 	})
 
 	return &RemoveFailedPods{
-		logger:    logger,
 		handle:    handle,
 		podFilter: podFilter,
 		args:      failedPodsArgs,
@@ -95,9 +92,8 @@ func (d *RemoveFailedPods) Name() string {
 
 // Deschedule extension point implementation for the plugin
 func (d *RemoveFailedPods) Deschedule(ctx context.Context, nodes []*v1.Node) *frameworktypes.Status {
-	logger := klog.FromContext(klog.NewContext(ctx, d.logger)).WithValues("ExtensionPoint", frameworktypes.DescheduleExtensionPoint)
 	for _, node := range nodes {
-		logger.V(2).Info("Processing node", "node", klog.KObj(node))
+		klog.V(2).InfoS("Processing node", "node", klog.KObj(node))
 		pods, err := podutil.ListAllPodsOnANode(node.Name, d.handle.GetPodsAssignedToNodeFunc(), d.podFilter)
 		if err != nil {
 			// no pods evicted as error encountered retrieving evictable Pods
@@ -106,19 +102,10 @@ func (d *RemoveFailedPods) Deschedule(ctx context.Context, nodes []*v1.Node) *fr
 			}
 		}
 		totalPods := len(pods)
-	loop:
 		for i := 0; i < totalPods; i++ {
-			err := d.handle.Evictor().Evict(ctx, pods[i], evictions.EvictOptions{StrategyName: PluginName})
-			if err == nil {
-				continue
-			}
-			switch err.(type) {
-			case *evictions.EvictionNodeLimitError:
-				break loop
-			case *evictions.EvictionTotalLimitError:
-				return nil
-			default:
-				logger.Error(err, "eviction failed")
+			d.handle.Evictor().Evict(ctx, pods[i], evictions.EvictOptions{})
+			if d.handle.Evictor().NodeLimitExceeded(node) {
+				break
 			}
 		}
 	}
@@ -161,17 +148,6 @@ func validateCanEvict(pod *v1.Pod, failedPodArgs *RemoveFailedPodsArgs) error {
 		}
 	}
 
-	if len(failedPodArgs.ExitCodes) > 0 {
-		exitCodes := getFailedContainerStatusExitCodes(pod.Status.ContainerStatuses)
-		if failedPodArgs.IncludingInitContainers {
-			exitCodes = append(exitCodes, getFailedContainerStatusExitCodes(pod.Status.InitContainerStatuses)...)
-		}
-
-		if !sets.New(failedPodArgs.ExitCodes...).HasAny(exitCodes...) {
-			errs = append(errs, fmt.Errorf("pod does not match any of the exitCodes"))
-		}
-	}
-
 	return utilerrors.NewAggregate(errs)
 }
 
@@ -188,16 +164,4 @@ func getFailedContainerStatusReasons(containerStatuses []v1.ContainerStatus) []s
 	}
 
 	return reasons
-}
-
-func getFailedContainerStatusExitCodes(containerStatuses []v1.ContainerStatus) []int32 {
-	exitCodes := make([]int32, 0)
-
-	for _, containerStatus := range containerStatuses {
-		if containerStatus.State.Terminated != nil {
-			exitCodes = append(exitCodes, containerStatus.State.Terminated.ExitCode)
-		}
-	}
-
-	return exitCodes
 }

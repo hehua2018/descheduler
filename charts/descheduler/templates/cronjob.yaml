@@ -3,16 +3,9 @@ apiVersion: {{ .Values.cronJobApiVersion | default "batch/v1" }}
 kind: CronJob
 metadata:
   name: {{ template "descheduler.fullname" . }}
-  namespace: {{ include "descheduler.namespace" . }}
-  {{- if .Values.cronJobAnnotations }}
-  annotations:
-    {{- .Values.cronJobAnnotations | toYaml | nindent 4 }}
-  {{- end }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "descheduler.labels" . | nindent 4 }}
-    {{- if .Values.cronJobLabels }}
-    {{- .Values.cronJobLabels | toYaml | nindent 4 }}
-    {{- end }}
 spec:
   schedule: {{ .Values.schedule | quote }}
   {{- if .Values.suspend }}
@@ -22,33 +15,19 @@ spec:
   {{- if .Values.startingDeadlineSeconds }}
   startingDeadlineSeconds: {{ .Values.startingDeadlineSeconds }}
   {{- end }}
-  {{- if ne .Values.successfulJobsHistoryLimit nil }}
+  {{- if .Values.successfulJobsHistoryLimit }}
   successfulJobsHistoryLimit: {{ .Values.successfulJobsHistoryLimit }}
   {{- end }}
-  {{- if ne .Values.failedJobsHistoryLimit nil }}
+  {{- if .Values.failedJobsHistoryLimit }}
   failedJobsHistoryLimit: {{ .Values.failedJobsHistoryLimit }}
   {{- end }}
   {{- if .Values.timeZone }}
   timeZone: {{ .Values.timeZone }}
   {{- end }}
   jobTemplate:
-    {{- if or .Values.jobAnnotations .Values.jobLabels }}
-    metadata:
-      {{- if .Values.jobAnnotations }}
-      annotations:
-        {{- .Values.jobAnnotations | toYaml | nindent 8 }}
-      {{- end }}
-      {{- if .Values.jobLabels }}
-      labels:
-        {{- .Values.jobLabels | toYaml | nindent 8 }}
-      {{- end }}
-    {{- end }}
     spec:
       {{- if .Values.ttlSecondsAfterFinished }}
       ttlSecondsAfterFinished: {{ .Values.ttlSecondsAfterFinished }}
-      {{- end }}
-      {{- if .Values.activeDeadlineSeconds }}
-      activeDeadlineSeconds: {{ .Values.activeDeadlineSeconds }}
       {{- end }}
       template:
         metadata:
@@ -72,10 +51,6 @@ spec:
           affinity:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.topologySpreadConstraints }}
-          topologySpreadConstraints:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
           {{- if .Values.dnsConfig }}
           dnsConfig:
             {{- .Values.dnsConfig | toYaml | nindent 12 }}
@@ -88,9 +63,6 @@ spec:
           priorityClassName: {{ .Values.priorityClassName }}
           {{- end }}
           serviceAccountName: {{ template "descheduler.serviceAccountName" . }}
-          {{- if kindIs "bool" .Values.automountServiceAccountToken }}
-          automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
-          {{- end }}
           restartPolicy: "Never"
           {{- with .Values.imagePullSecrets }}
           imagePullSecrets:
@@ -105,37 +77,19 @@ spec:
               args:
                 - --policy-config-file=/policy-dir/policy.yaml
                 {{- range $key, $value := .Values.cmdOptions }}
-                {{- if ne $value nil }}
-                - {{ printf "--%s=%s" $key (toString $value) }}
-                {{- else }}
-                - {{ printf "--%s" $key }}
-                {{- end }}
+                - {{ printf "--%s" $key }}{{ if $value }}={{ $value }}{{ end }}
                 {{- end }}
               livenessProbe:
                 {{- toYaml .Values.livenessProbe | nindent 16 }}
-              ports:
-                {{- toYaml .Values.ports | nindent 16 }}
               resources:
                 {{- toYaml .Values.resources | nindent 16 }}
-              {{- if .Values.securityContext }}
               securityContext:
                 {{- toYaml .Values.securityContext | nindent 16 }}
-              {{- end }}
               volumeMounts:
                 - mountPath: /policy-dir
                   name: policy-volume
-                {{- if and .Values.extraServiceAccountVolumeMounts (not .Values.automountServiceAccountToken) }}
-                  {{ toYaml .Values.extraServiceAccountVolumeMounts | nindent 16 }}
-                {{- end }}
-          {{- if .Values.podSecurityContext }}
-          securityContext:
-            {{- toYaml .Values.podSecurityContext | nindent 12 }}
-          {{- end }}
           volumes:
           - name: policy-volume
             configMap:
               name: {{ template "descheduler.fullname" . }}
-          {{- if and .Values.extraServiceAccountVolumes (not .Values.automountServiceAccountToken) }}
-            {{ toYaml .Values.extraServiceAccountVolumes | nindent 10 }}
-          {{- end }}
 {{- end }}

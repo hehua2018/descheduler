@@ -21,13 +21,18 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/events"
 	frameworktypes "sigs.k8s.io/descheduler/pkg/framework/types"
 
+	"sigs.k8s.io/descheduler/pkg/descheduler/evictions"
+	podutil "sigs.k8s.io/descheduler/pkg/descheduler/pod"
+	frameworkfake "sigs.k8s.io/descheduler/pkg/framework/fake"
 	"sigs.k8s.io/descheduler/pkg/framework/plugins/defaultevictor"
-	frameworktesting "sigs.k8s.io/descheduler/pkg/framework/testing"
 	"sigs.k8s.io/descheduler/test"
 )
 
@@ -36,15 +41,12 @@ var OneHourInSeconds uint = 3600
 func TestRemoveFailedPods(t *testing.T) {
 	createRemoveFailedPodsArgs := func(
 		includingInitContainers bool,
-		reasons []string,
-		exitCodes []int32,
-		excludeKinds []string,
+		reasons, excludeKinds []string,
 		minAgeSeconds *uint,
 	) RemoveFailedPodsArgs {
 		return RemoveFailedPodsArgs{
 			IncludingInitContainers: includingInitContainers,
 			Reasons:                 reasons,
-			ExitCodes:               exitCodes,
 			MinPodLifetimeSeconds:   minAgeSeconds,
 			ExcludeOwnerKinds:       excludeKinds,
 		}
@@ -67,14 +69,14 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description:             "0 failures, 0 evictions",
-			args:                    createRemoveFailedPodsArgs(false, nil, nil, nil, nil),
+			args:                    createRemoveFailedPodsArgs(false, nil, nil, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 0,
 			pods:                    []*v1.Pod{}, // no pods come back with field selector phase=Failed
 		},
 		{
 			description:             "1 container terminated with reason NodeAffinity, 1 eviction",
-			args:                    createRemoveFailedPodsArgs(false, nil, nil, nil, nil),
+			args:                    createRemoveFailedPodsArgs(false, nil, nil, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 1,
 			pods: []*v1.Pod{
@@ -84,69 +86,8 @@ func TestRemoveFailedPods(t *testing.T) {
 			},
 		},
 		{
-			description:             "1 container terminated with exitCode 1, 1 eviction",
-			args:                    createRemoveFailedPodsArgs(false, nil, []int32{1}, nil, nil),
-			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
-			expectedEvictedPodCount: 1,
-			pods: []*v1.Pod{
-				buildTestPod("p1", "node1", newPodStatus("", "", nil, &v1.ContainerState{
-					Terminated: &v1.ContainerStateTerminated{ExitCode: 1},
-				}), nil),
-			},
-		},
-		{
-			description:             "1 container terminated with exitCode 1, reason NodeAffinity, 1 eviction",
-			args:                    createRemoveFailedPodsArgs(false, nil, []int32{1}, nil, nil),
-			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
-			expectedEvictedPodCount: 1,
-			pods: []*v1.Pod{
-				buildTestPod("p1", "node1", newPodStatus("", "", nil, &v1.ContainerState{
-					Terminated: &v1.ContainerStateTerminated{Reason: "NodeAffinity", ExitCode: 1},
-				}), nil),
-			},
-		},
-		{
-			description:             "1 container terminated with exitCode 1, expected exitCode 2, 0 eviction",
-			args:                    createRemoveFailedPodsArgs(false, nil, []int32{2}, nil, nil),
-			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
-			expectedEvictedPodCount: 0,
-			pods: []*v1.Pod{
-				buildTestPod("p1", "node1", newPodStatus("", "", nil, &v1.ContainerState{
-					Terminated: &v1.ContainerStateTerminated{ExitCode: 1},
-				}), nil),
-			},
-		},
-		{
-			description:             "2 containers terminated with exitCode 1 and 2 respectively, 2 evictions",
-			args:                    createRemoveFailedPodsArgs(false, nil, []int32{1, 2, 3}, nil, nil),
-			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
-			expectedEvictedPodCount: 2,
-			pods: []*v1.Pod{
-				buildTestPod("p1", "node1", newPodStatus("", "", nil, &v1.ContainerState{
-					Terminated: &v1.ContainerStateTerminated{ExitCode: 1},
-				}), nil),
-				buildTestPod("p2", "node1", newPodStatus("", "", nil, &v1.ContainerState{
-					Terminated: &v1.ContainerStateTerminated{ExitCode: 2},
-				}), nil),
-			},
-		},
-		{
-			description:             "2 containers terminated with exitCode 1 and 2 respectively, expected exitCode 1, 1 eviction",
-			args:                    createRemoveFailedPodsArgs(false, nil, []int32{1}, nil, nil),
-			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
-			expectedEvictedPodCount: 1,
-			pods: []*v1.Pod{
-				buildTestPod("p1", "node1", newPodStatus("", "", nil, &v1.ContainerState{
-					Terminated: &v1.ContainerStateTerminated{ExitCode: 1},
-				}), nil),
-				buildTestPod("p2", "node1", newPodStatus("", "", nil, &v1.ContainerState{
-					Terminated: &v1.ContainerStateTerminated{ExitCode: 2},
-				}), nil),
-			},
-		},
-		{
 			description:             "1 init container terminated with reason NodeAffinity, 1 eviction",
-			args:                    createRemoveFailedPodsArgs(true, nil, nil, nil, nil),
+			args:                    createRemoveFailedPodsArgs(true, nil, nil, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 1,
 			pods: []*v1.Pod{
@@ -156,30 +97,8 @@ func TestRemoveFailedPods(t *testing.T) {
 			},
 		},
 		{
-			description:             "1 init container terminated with exitCode 1, 1 eviction",
-			args:                    createRemoveFailedPodsArgs(true, nil, []int32{1}, nil, nil),
-			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
-			expectedEvictedPodCount: 1,
-			pods: []*v1.Pod{
-				buildTestPod("p1", "node1", newPodStatus("", "", nil, &v1.ContainerState{
-					Terminated: &v1.ContainerStateTerminated{ExitCode: 1},
-				}), nil),
-			},
-		},
-		{
-			description:             "1 init container terminated with exitCode 2, expected 1, 0 eviction",
-			args:                    createRemoveFailedPodsArgs(true, nil, []int32{1}, nil, nil),
-			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
-			expectedEvictedPodCount: 0,
-			pods: []*v1.Pod{
-				buildTestPod("p1", "node1", newPodStatus("", "", nil, &v1.ContainerState{
-					Terminated: &v1.ContainerStateTerminated{ExitCode: 2},
-				}), nil),
-			},
-		},
-		{
 			description:             "1 init container waiting with reason CreateContainerConfigError, 1 eviction",
-			args:                    createRemoveFailedPodsArgs(true, nil, nil, nil, nil),
+			args:                    createRemoveFailedPodsArgs(true, nil, nil, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 1,
 			pods: []*v1.Pod{
@@ -190,7 +109,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description: "2 init container waiting with reason CreateContainerConfigError, 2 nodes, 2 evictions",
-			args:        createRemoveFailedPodsArgs(true, nil, nil, nil, nil),
+			args:        createRemoveFailedPodsArgs(true, nil, nil, nil),
 			nodes: []*v1.Node{
 				test.BuildTestNode("node1", 2000, 3000, 10, nil),
 				test.BuildTestNode("node2", 2000, 3000, 10, nil),
@@ -207,7 +126,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description:             "include reason=CreateContainerConfigError, 1 container terminated with reason CreateContainerConfigError, 1 eviction",
-			args:                    createRemoveFailedPodsArgs(false, []string{"CreateContainerConfigError"}, nil, nil, nil),
+			args:                    createRemoveFailedPodsArgs(false, []string{"CreateContainerConfigError"}, nil, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 1,
 			pods: []*v1.Pod{
@@ -218,7 +137,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description:             "include reason=CreateContainerConfigError+NodeAffinity, 1 container terminated with reason CreateContainerConfigError, 1 eviction",
-			args:                    createRemoveFailedPodsArgs(false, []string{"CreateContainerConfigError", "NodeAffinity"}, nil, nil, nil),
+			args:                    createRemoveFailedPodsArgs(false, []string{"CreateContainerConfigError", "NodeAffinity"}, nil, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 1,
 			pods: []*v1.Pod{
@@ -229,7 +148,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description:             "include reason=CreateContainerConfigError, 1 container terminated with reason NodeAffinity, 0 eviction",
-			args:                    createRemoveFailedPodsArgs(false, []string{"CreateContainerConfigError"}, nil, nil, nil),
+			args:                    createRemoveFailedPodsArgs(false, []string{"CreateContainerConfigError"}, nil, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 0,
 			pods: []*v1.Pod{
@@ -240,7 +159,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description:             "include init container=false, 1 init container waiting with reason CreateContainerConfigError, 0 eviction",
-			args:                    createRemoveFailedPodsArgs(false, []string{"CreateContainerConfigError"}, nil, nil, nil),
+			args:                    createRemoveFailedPodsArgs(false, []string{"CreateContainerConfigError"}, nil, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 0,
 			pods: []*v1.Pod{
@@ -251,7 +170,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description:             "lifetime 1 hour, 1 container terminated with reason NodeAffinity, 0 eviction",
-			args:                    createRemoveFailedPodsArgs(false, nil, nil, nil, &OneHourInSeconds),
+			args:                    createRemoveFailedPodsArgs(false, nil, nil, &OneHourInSeconds),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 0,
 			pods: []*v1.Pod{
@@ -262,7 +181,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description: "nodeFit=true, 1 unschedulable node, 1 container terminated with reason NodeAffinity, 0 eviction",
-			args:        createRemoveFailedPodsArgs(false, nil, nil, nil, nil),
+			args:        createRemoveFailedPodsArgs(false, nil, nil, nil),
 			nodes: []*v1.Node{
 				test.BuildTestNode("node1", 2000, 3000, 10, nil),
 				test.BuildTestNode("node2", 2000, 2000, 10, func(node *v1.Node) {
@@ -279,7 +198,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description:             "nodeFit=true, only available node does not have enough resources, 1 container terminated with reason CreateContainerConfigError, 0 eviction",
-			args:                    createRemoveFailedPodsArgs(false, []string{"CreateContainerConfigError"}, nil, nil, nil),
+			args:                    createRemoveFailedPodsArgs(false, []string{"CreateContainerConfigError"}, nil, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 1, 1, 10, nil), test.BuildTestNode("node2", 0, 0, 10, nil)},
 			expectedEvictedPodCount: 0,
 			pods: []*v1.Pod{
@@ -291,7 +210,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description:             "excluded owner kind=ReplicaSet, 1 init container terminated with owner kind=ReplicaSet, 0 eviction",
-			args:                    createRemoveFailedPodsArgs(true, nil, nil, []string{"ReplicaSet"}, nil),
+			args:                    createRemoveFailedPodsArgs(true, nil, []string{"ReplicaSet"}, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 0,
 			pods: []*v1.Pod{
@@ -302,7 +221,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description:             "excluded owner kind=DaemonSet, 1 init container terminated with owner kind=ReplicaSet, 1 eviction",
-			args:                    createRemoveFailedPodsArgs(true, nil, nil, []string{"DaemonSet"}, nil),
+			args:                    createRemoveFailedPodsArgs(true, nil, []string{"DaemonSet"}, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 1,
 			pods: []*v1.Pod{
@@ -313,7 +232,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description:             "excluded owner kind=DaemonSet, 1 init container terminated with owner kind=ReplicaSet, 1 pod in termination; nothing should be moved",
-			args:                    createRemoveFailedPodsArgs(true, nil, nil, []string{"DaemonSet"}, nil),
+			args:                    createRemoveFailedPodsArgs(true, nil, []string{"DaemonSet"}, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 0,
 			pods: []*v1.Pod{
@@ -324,7 +243,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description:             "1 container terminated with reason ShutDown, 0 evictions",
-			args:                    createRemoveFailedPodsArgs(false, nil, nil, nil, nil),
+			args:                    createRemoveFailedPodsArgs(false, nil, nil, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 0,
 			pods: []*v1.Pod{
@@ -334,7 +253,7 @@ func TestRemoveFailedPods(t *testing.T) {
 		},
 		{
 			description:             "include reason=Shutdown, 2 containers terminated with reason ShutDown, 2 evictions",
-			args:                    createRemoveFailedPodsArgs(false, []string{"Shutdown"}, nil, nil, nil),
+			args:                    createRemoveFailedPodsArgs(false, []string{"Shutdown"}, nil, nil),
 			nodes:                   []*v1.Node{test.BuildTestNode("node1", 2000, 3000, 10, nil)},
 			expectedEvictedPodCount: 2,
 			pods: []*v1.Pod{
@@ -357,21 +276,65 @@ func TestRemoveFailedPods(t *testing.T) {
 			}
 			fakeClient := fake.NewSimpleClientset(objs...)
 
-			handle, podEvictor, err := frameworktesting.InitFrameworkHandle(ctx, fakeClient, nil, defaultevictor.DefaultEvictorArgs{NodeFit: tc.nodeFit}, nil)
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
+			podInformer := sharedInformerFactory.Core().V1().Pods().Informer()
+
+			getPodsAssignedToNode, err := podutil.BuildGetPodsAssignedToNodeFunc(podInformer)
 			if err != nil {
-				t.Fatalf("Unable to initialize a framework handle: %v", err)
+				t.Errorf("Build get pods assigned to node function error: %v", err)
 			}
 
-			plugin, err := New(ctx, &RemoveFailedPodsArgs{
+			sharedInformerFactory.Start(ctx.Done())
+			sharedInformerFactory.WaitForCacheSync(ctx.Done())
+
+			eventRecorder := &events.FakeRecorder{}
+
+			podEvictor := evictions.NewPodEvictor(
+				fakeClient,
+				policyv1.SchemeGroupVersion.String(),
+				false,
+				nil,
+				nil,
+				tc.nodes,
+				false,
+				eventRecorder,
+			)
+
+			defaultevictorArgs := &defaultevictor.DefaultEvictorArgs{
+				EvictLocalStoragePods:   false,
+				EvictSystemCriticalPods: false,
+				IgnorePvcPods:           false,
+				EvictFailedBarePods:     false,
+				NodeFit:                 tc.nodeFit,
+			}
+
+			evictorFilter, err := defaultevictor.New(
+				defaultevictorArgs,
+				&frameworkfake.HandleImpl{
+					ClientsetImpl:                 fakeClient,
+					GetPodsAssignedToNodeFuncImpl: getPodsAssignedToNode,
+					SharedInformerFactoryImpl:     sharedInformerFactory,
+				},
+			)
+			if err != nil {
+				t.Fatalf("Unable to initialize the plugin: %v", err)
+			}
+
+			plugin, err := New(&RemoveFailedPodsArgs{
 				Reasons:                 tc.args.Reasons,
-				ExitCodes:               tc.args.ExitCodes,
 				MinPodLifetimeSeconds:   tc.args.MinPodLifetimeSeconds,
 				IncludingInitContainers: tc.args.IncludingInitContainers,
 				ExcludeOwnerKinds:       tc.args.ExcludeOwnerKinds,
 				LabelSelector:           tc.args.LabelSelector,
 				Namespaces:              tc.args.Namespaces,
 			},
-				handle,
+				&frameworkfake.HandleImpl{
+					ClientsetImpl:                 fakeClient,
+					PodEvictorImpl:                podEvictor,
+					EvictorFilterImpl:             evictorFilter.(frameworktypes.EvictorPlugin),
+					SharedInformerFactoryImpl:     sharedInformerFactory,
+					GetPodsAssignedToNodeFuncImpl: getPodsAssignedToNode,
+				},
 			)
 			if err != nil {
 				t.Fatalf("Unable to initialize the plugin: %v", err)

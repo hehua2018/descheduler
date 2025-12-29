@@ -5,7 +5,6 @@ profiles:
     pluginConfig:
     - name: "LowNodeUtilization"
       args:
-        useActualUsage: true  #use actual usage or requests      
         thresholds:
           "memory": 20
         targetThresholds:

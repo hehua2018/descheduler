@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
-	utilptr "k8s.io/utils/ptr"
+	utilpointer "k8s.io/utils/pointer"
 
 	v1helper "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
@@ -53,20 +53,18 @@ type topology struct {
 // topologySpreadConstraint is an internal version for v1.TopologySpreadConstraint
 // and where the selector is parsed.
 // This mirrors scheduler: https://github.com/kubernetes/kubernetes/blob/release-1.28/pkg/scheduler/framework/plugins/podtopologyspread/common.go#L37
-// Fields are exported for structured logging.
 type topologySpreadConstraint struct {
-	MaxSkew            int32
-	TopologyKey        string
-	Selector           labels.Selector
-	NodeAffinityPolicy v1.NodeInclusionPolicy
-	NodeTaintsPolicy   v1.NodeInclusionPolicy
-	PodNodeAffinity    nodeaffinity.RequiredNodeAffinity
-	PodTolerations     []v1.Toleration
+	maxSkew            int32
+	topologyKey        string
+	selector           labels.Selector
+	nodeAffinityPolicy v1.NodeInclusionPolicy
+	nodeTaintsPolicy   v1.NodeInclusionPolicy
+	podNodeAffinity    nodeaffinity.RequiredNodeAffinity
+	podTolerations     []v1.Toleration
 }
 
 // RemovePodsViolatingTopologySpreadConstraint evicts pods which violate their topology spread constraints
 type RemovePodsViolatingTopologySpreadConstraint struct {
-	logger    klog.Logger
 	handle    frameworktypes.Handle
 	args      *RemovePodsViolatingTopologySpreadConstraintArgs
 	podFilter podutil.FilterFunc
@@ -75,31 +73,21 @@ type RemovePodsViolatingTopologySpreadConstraint struct {
 var _ frameworktypes.BalancePlugin = &RemovePodsViolatingTopologySpreadConstraint{}
 
 // New builds plugin from its arguments while passing a handle
-func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle) (frameworktypes.Plugin, error) {
+func New(args runtime.Object, handle frameworktypes.Handle) (frameworktypes.Plugin, error) {
 	pluginArgs, ok := args.(*RemovePodsViolatingTopologySpreadConstraintArgs)
 	if !ok {
 		return nil, fmt.Errorf("want args to be of type RemovePodsViolatingTopologySpreadConstraintArgs, got %T", args)
-	}
-	logger := klog.FromContext(ctx).WithValues("plugin", PluginName)
-
-	var includedNamespaces, excludedNamespaces sets.Set[string]
-	if pluginArgs.Namespaces != nil {
-		includedNamespaces = sets.New(pluginArgs.Namespaces.Include...)
-		excludedNamespaces = sets.New(pluginArgs.Namespaces.Exclude...)
 	}
 
 	podFilter, err := podutil.NewOptions().
 		WithFilter(handle.Evictor().Filter).
 		WithLabelSelector(pluginArgs.LabelSelector).
-		WithNamespaces(includedNamespaces).
-		WithoutNamespaces(excludedNamespaces).
 		BuildFilterFunc()
 	if err != nil {
 		return nil, fmt.Errorf("error initializing pod filter function: %v", err)
 	}
 
 	return &RemovePodsViolatingTopologySpreadConstraint{
-		logger:    logger,
 		handle:    handle,
 		podFilter: podFilter,
 		args:      pluginArgs,
@@ -113,8 +101,6 @@ func (d *RemovePodsViolatingTopologySpreadConstraint) Name() string {
 
 // nolint: gocyclo
 func (d *RemovePodsViolatingTopologySpreadConstraint) Balance(ctx context.Context, nodes []*v1.Node) *frameworktypes.Status {
-	logger := klog.FromContext(klog.NewContext(ctx, d.logger)).WithValues("ExtensionPoint", frameworktypes.BalanceExtensionPoint)
-
 	nodeMap := make(map[string]*v1.Node, len(nodes))
 	for _, node := range nodes {
 		nodeMap[node.Name] = node
@@ -132,8 +118,13 @@ func (d *RemovePodsViolatingTopologySpreadConstraint) Balance(ctx context.Contex
 	// iterate through all topoPairs for this topologyKey and diff currentPods -minPods <=maxSkew
 	// if diff > maxSkew, add this pod in the current bucket for eviction
 
-	logger.V(1).Info("Processing namespaces for topology spread constraints")
+	klog.V(1).Info("Processing namespaces for topology spread constraints")
 	podsForEviction := make(map[*v1.Pod]struct{})
+	var includedNamespaces, excludedNamespaces sets.Set[string]
+	if d.args.Namespaces != nil {
+		includedNamespaces = sets.New(d.args.Namespaces.Include...)
+		excludedNamespaces = sets.New(d.args.Namespaces.Exclude...)
+	}
 
 	pods, err := podutil.ListPodsOnNodes(nodes, d.handle.GetPodsAssignedToNodeFunc(), d.podFilter)
 	if err != nil {
@@ -148,7 +139,12 @@ func (d *RemovePodsViolatingTopologySpreadConstraint) Balance(ctx context.Contex
 
 	// 1. for each namespace...
 	for namespace := range namespacedPods {
-		logger.V(4).Info("Processing namespace for topology spread constraints", "namespace", namespace)
+		klog.V(4).InfoS("Processing namespace for topology spread constraints", "namespace", namespace)
+
+		if (len(includedNamespaces) > 0 && !includedNamespaces.Has(namespace)) ||
+			(len(excludedNamespaces) > 0 && excludedNamespaces.Has(namespace)) {
+			continue
+		}
 
 		// ...where there is a topology constraint
 		var namespaceTopologySpreadConstraints []topologySpreadConstraint
@@ -161,7 +157,7 @@ func (d *RemovePodsViolatingTopologySpreadConstraint) Balance(ctx context.Contex
 
 				namespaceTopologySpreadConstraint, err := newTopologySpreadConstraint(constraint, pod)
 				if err != nil {
-					logger.Error(err, "cannot process topology spread constraint")
+					klog.ErrorS(err, "cannot process topology spread constraint")
 					continue
 				}
 
@@ -184,9 +180,9 @@ func (d *RemovePodsViolatingTopologySpreadConstraint) Balance(ctx context.Contex
 			// pre-populate the topologyPair map with all the topologies available from the nodeMap
 			// (we can't just build it from existing pods' nodes because a topology may have 0 pods)
 			for _, node := range nodeMap {
-				if val, ok := node.Labels[tsc.TopologyKey]; ok {
+				if val, ok := node.Labels[tsc.topologyKey]; ok {
 					if matchNodeInclusionPolicies(tsc, node) {
-						constraintTopologies[topologyPair{key: tsc.TopologyKey, value: val}] = make([]*v1.Pod, 0)
+						constraintTopologies[topologyPair{key: tsc.topologyKey, value: val}] = make([]*v1.Pod, 0)
 					}
 				}
 			}
@@ -200,7 +196,7 @@ func (d *RemovePodsViolatingTopologySpreadConstraint) Balance(ctx context.Contex
 					continue
 				}
 				// 4. if the pod matches this TopologySpreadConstraint LabelSelector
-				if !tsc.Selector.Matches(labels.Set(pod.Labels)) {
+				if !tsc.selector.Matches(labels.Set(pod.Labels)) {
 					continue
 				}
 
@@ -210,18 +206,18 @@ func (d *RemovePodsViolatingTopologySpreadConstraint) Balance(ctx context.Contex
 					// If ok is false, node is nil in which case node.Labels will panic. In which case a pod is yet to be scheduled. So it's safe to just continue here.
 					continue
 				}
-				nodeValue, ok := node.Labels[tsc.TopologyKey]
+				nodeValue, ok := node.Labels[tsc.topologyKey]
 				if !ok {
 					continue
 				}
 				// 6. create a topoPair with key as this TopologySpreadConstraint
-				topoPair := topologyPair{key: tsc.TopologyKey, value: nodeValue}
+				topoPair := topologyPair{key: tsc.topologyKey, value: nodeValue}
 				// 7. add the pod with key as this topoPair
 				constraintTopologies[topoPair] = append(constraintTopologies[topoPair], pod)
 				sumPods++
 			}
 			if topologyIsBalanced(constraintTopologies, tsc) {
-				logger.V(2).Info("Skipping topology constraint because it is already balanced", "constraint", tsc)
+				klog.V(2).InfoS("Skipping topology constraint because it is already balanced", "constraint", tsc)
 				continue
 			}
 			d.balanceDomains(podsForEviction, tsc, constraintTopologies, sumPods, nodes)
@@ -238,18 +234,10 @@ func (d *RemovePodsViolatingTopologySpreadConstraint) Balance(ctx context.Contex
 		}
 
 		if d.handle.Evictor().PreEvictionFilter(pod) {
-			err := d.handle.Evictor().Evict(ctx, pod, evictions.EvictOptions{StrategyName: PluginName})
-			if err == nil {
-				continue
-			}
-			switch err.(type) {
-			case *evictions.EvictionNodeLimitError:
-				nodeLimitExceeded[pod.Spec.NodeName] = true
-			case *evictions.EvictionTotalLimitError:
-				return nil
-			default:
-				logger.Error(err, "eviction failed")
-			}
+			d.handle.Evictor().Evict(ctx, pod, evictions.EvictOptions{})
+		}
+		if d.handle.Evictor().NodeLimitExceeded(nodeMap[pod.Spec.NodeName]) {
+			nodeLimitExceeded[pod.Spec.NodeName] = true
 		}
 	}
 
@@ -278,7 +266,7 @@ func topologyIsBalanced(topology map[topologyPair][]*v1.Pod, tsc topologySpreadC
 		if len(pods) > maxDomainSize {
 			maxDomainSize = len(pods)
 		}
-		if int32(maxDomainSize-minDomainSize) > tsc.MaxSkew {
+		if int32(maxDomainSize-minDomainSize) > tsc.maxSkew {
 			return false
 		}
 	}
@@ -316,10 +304,10 @@ func (d *RemovePodsViolatingTopologySpreadConstraint) balanceDomains(
 	isEvictable := d.handle.Evictor().Filter
 	sortedDomains := sortDomains(constraintTopologies, isEvictable)
 	getPodsAssignedToNode := d.handle.GetPodsAssignedToNodeFunc()
-	topologyBalanceNodeFit := utilptr.Deref(d.args.TopologyBalanceNodeFit, true)
+	topologyBalanceNodeFit := utilpointer.BoolDeref(d.args.TopologyBalanceNodeFit, true)
 
 	eligibleNodes := filterEligibleNodes(nodes, tsc)
-	nodesBelowIdealAvg := filterNodesBelowIdealAvg(eligibleNodes, sortedDomains, tsc.TopologyKey, idealAvg)
+	nodesBelowIdealAvg := filterNodesBelowIdealAvg(eligibleNodes, sortedDomains, tsc.topologyKey, idealAvg)
 
 	// i is the index for belowOrEqualAvg
 	// j is the index for aboveAvg
@@ -335,7 +323,7 @@ func (d *RemovePodsViolatingTopologySpreadConstraint) balanceDomains(
 		skew := float64(len(sortedDomains[j].pods) - len(sortedDomains[i].pods))
 
 		// if k and j are within the maxSkew of each other, move to next belowOrEqualAvg
-		if int32(skew) <= tsc.MaxSkew {
+		if int32(skew) <= tsc.maxSkew {
 			i++
 			continue
 		}
@@ -349,24 +337,16 @@ func (d *RemovePodsViolatingTopologySpreadConstraint) balanceDomains(
 		aboveAvg := math.Ceil(float64(len(sortedDomains[j].pods)) - idealAvg)
 		belowAvg := math.Ceil(idealAvg - float64(len(sortedDomains[i].pods)))
 		smallestDiff := math.Min(aboveAvg, belowAvg)
-		halfSkew := math.Ceil((skew - float64(tsc.MaxSkew)) / 2)
+		halfSkew := math.Ceil((skew - float64(tsc.maxSkew)) / 2)
 		movePods := int(math.Min(smallestDiff, halfSkew))
 		if movePods <= 0 {
 			i++
 			continue
 		}
 
-		// prefer pods above the ideal average to be those that fit on nodes that are below ideal avg (need more pods)
-		sort.SliceStable(sortedDomains[j].pods, func(a, b int) bool {
-			canEvictA := node.PodFitsAnyOtherNode(getPodsAssignedToNode, sortedDomains[j].pods[a], nodesBelowIdealAvg)
-			canEvictB := node.PodFitsAnyOtherNode(getPodsAssignedToNode, sortedDomains[j].pods[b], nodesBelowIdealAvg)
-			return !canEvictA && canEvictB
-		})
-
 		// remove pods from the higher topology and add them to the list of pods to be evicted
 		// also (just for tracking), add them to the list of pods in the lower topology
 		aboveToEvict := sortedDomains[j].pods[len(sortedDomains[j].pods)-movePods:]
-
 		for k := range aboveToEvict {
 			// PodFitsAnyOtherNode excludes the current node because, for the sake of domain balancing only, we care about if there is any other
 			// place it could theoretically fit.
@@ -381,7 +361,7 @@ func (d *RemovePodsViolatingTopologySpreadConstraint) balanceDomains(
 			// So, a better selection heuristic could improve performance.
 
 			if topologyBalanceNodeFit && !node.PodFitsAnyOtherNode(getPodsAssignedToNode, aboveToEvict[k], nodesBelowIdealAvg) {
-				d.logger.V(2).Info("ignoring pod for eviction as it does not fit on any other node", "pod", klog.KObj(aboveToEvict[k]))
+				klog.V(2).InfoS("ignoring pod for eviction as it does not fit on any other node", "pod", klog.KObj(aboveToEvict[k]))
 				continue
 			}
 
@@ -428,24 +408,18 @@ func sortDomains(constraintTopologyPairs map[topologyPair][]*v1.Pod, isEvictable
 		// followed by the highest priority pods with affinity or nodeSelector
 		sort.Slice(list, func(i, j int) bool {
 			// any non-evictable pods should be considered last (ie, first in the list)
-			evictableI := isEvictable(list[i])
-			evictableJ := isEvictable(list[j])
-
-			if !evictableI || !evictableJ {
+			if !isEvictable(list[i]) || !isEvictable(list[j]) {
 				// false - i is the only non-evictable, so return true to put it first
 				// true - j is non-evictable, so return false to put j before i
 				// if true and both and non-evictable, order doesn't matter
-				return !(evictableI && !evictableJ)
+				return !(isEvictable(list[i]) && !isEvictable(list[j]))
 			}
 
-			hasSelectorOrAffinityI := hasSelectorOrAffinity(*list[i])
-			hasSelectorOrAffinityJ := hasSelectorOrAffinity(*list[j])
 			// if both pods have selectors/affinity, compare them by their priority
-			if hasSelectorOrAffinityI == hasSelectorOrAffinityJ {
-				// Sort by priority in ascending order (lower priority Pods first)
-				return !comparePodsByPriority(list[i], list[j])
+			if hasSelectorOrAffinity(*list[i]) == hasSelectorOrAffinity(*list[j]) {
+				comparePodsByPriority(list[i], list[j])
 			}
-			return hasSelectorOrAffinityI && !hasSelectorOrAffinityJ
+			return hasSelectorOrAffinity(*list[i]) && !hasSelectorOrAffinity(*list[j])
 		})
 		sortedTopologies = append(sortedTopologies, topology{pair: pair, pods: list})
 	}
@@ -501,15 +475,15 @@ func filterEligibleNodes(nodes []*v1.Node, tsc topologySpreadConstraint) []*v1.N
 }
 
 func matchNodeInclusionPolicies(tsc topologySpreadConstraint, node *v1.Node) bool {
-	if tsc.NodeAffinityPolicy == v1.NodeInclusionPolicyHonor {
+	if tsc.nodeAffinityPolicy == v1.NodeInclusionPolicyHonor {
 		// We ignore parsing errors here for backwards compatibility.
-		if match, _ := tsc.PodNodeAffinity.Match(node); !match {
+		if match, _ := tsc.podNodeAffinity.Match(node); !match {
 			return false
 		}
 	}
 
-	if tsc.NodeTaintsPolicy == v1.NodeInclusionPolicyHonor {
-		if _, untolerated := v1helper.FindMatchingUntoleratedTaint(node.Spec.Taints, tsc.PodTolerations, doNotScheduleTaintsFilterFunc()); untolerated {
+	if tsc.nodeTaintsPolicy == v1.NodeInclusionPolicyHonor {
+		if _, untolerated := v1helper.FindMatchingUntoleratedTaint(node.Spec.Taints, tsc.podTolerations, doNotScheduleTaintsFilterFunc()); untolerated {
 			return false
 		}
 	}
@@ -536,19 +510,19 @@ func newTopologySpreadConstraint(constraint v1.TopologySpreadConstraint, pod *v1
 	}
 
 	tsc := topologySpreadConstraint{
-		MaxSkew:            constraint.MaxSkew,
-		TopologyKey:        constraint.TopologyKey,
-		Selector:           selector,
-		NodeAffinityPolicy: utilptr.Deref(constraint.NodeAffinityPolicy, v1.NodeInclusionPolicyHonor), // If NodeAffinityPolicy is nil, we treat NodeAffinityPolicy as "Honor".
-		NodeTaintsPolicy:   utilptr.Deref(constraint.NodeTaintsPolicy, v1.NodeInclusionPolicyIgnore),  // If NodeTaintsPolicy is nil, we treat NodeTaintsPolicy as "Ignore".
+		maxSkew:            constraint.MaxSkew,
+		topologyKey:        constraint.TopologyKey,
+		selector:           selector,
+		nodeAffinityPolicy: v1.NodeInclusionPolicyHonor,  // If NodeAffinityPolicy is nil, we treat NodeAffinityPolicy as "Honor".
+		nodeTaintsPolicy:   v1.NodeInclusionPolicyIgnore, // If NodeTaintsPolicy is nil, we treat NodeTaintsPolicy as "Ignore".
+		podNodeAffinity:    nodeaffinity.GetRequiredNodeAffinity(pod),
+		podTolerations:     pod.Spec.Tolerations,
 	}
-
-	if tsc.NodeAffinityPolicy == v1.NodeInclusionPolicyHonor {
-		tsc.PodNodeAffinity = nodeaffinity.GetRequiredNodeAffinity(pod)
+	if constraint.NodeAffinityPolicy != nil {
+		tsc.nodeAffinityPolicy = *constraint.NodeAffinityPolicy
 	}
-
-	if tsc.NodeTaintsPolicy == v1.NodeInclusionPolicyHonor {
-		tsc.PodTolerations = pod.Spec.Tolerations
+	if constraint.NodeTaintsPolicy != nil {
+		tsc.nodeTaintsPolicy = *constraint.NodeTaintsPolicy
 	}
 
 	return tsc, nil

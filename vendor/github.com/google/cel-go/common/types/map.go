@@ -17,7 +17,6 @@ package types
 import (
 	"fmt"
 	"reflect"
-	"sort"
 	"strings"
 
 	"github.com/stoewer/go-strcase"
@@ -33,10 +32,10 @@ import (
 )
 
 // NewDynamicMap returns a traits.Mapper value with dynamic key, value pairs.
-func NewDynamicMap(adapter Adapter, value any) traits.Mapper {
+func NewDynamicMap(adapter ref.TypeAdapter, value any) traits.Mapper {
 	refValue := reflect.ValueOf(value)
 	return &baseMap{
-		Adapter:     adapter,
+		TypeAdapter: adapter,
 		mapAccessor: newReflectMapAccessor(adapter, refValue),
 		value:       value,
 		size:        refValue.Len(),
@@ -47,10 +46,10 @@ func NewDynamicMap(adapter Adapter, value any) traits.Mapper {
 // encoded in protocol buffer form.
 //
 // The `adapter` argument provides type adaptation capabilities from proto to CEL.
-func NewJSONStruct(adapter Adapter, value *structpb.Struct) traits.Mapper {
+func NewJSONStruct(adapter ref.TypeAdapter, value *structpb.Struct) traits.Mapper {
 	fields := value.GetFields()
 	return &baseMap{
-		Adapter:     adapter,
+		TypeAdapter: adapter,
 		mapAccessor: newJSONStructAccessor(adapter, fields),
 		value:       value,
 		size:        len(fields),
@@ -58,9 +57,9 @@ func NewJSONStruct(adapter Adapter, value *structpb.Struct) traits.Mapper {
 }
 
 // NewRefValMap returns a specialized traits.Mapper with CEL valued keys and values.
-func NewRefValMap(adapter Adapter, value map[ref.Val]ref.Val) traits.Mapper {
+func NewRefValMap(adapter ref.TypeAdapter, value map[ref.Val]ref.Val) traits.Mapper {
 	return &baseMap{
-		Adapter:     adapter,
+		TypeAdapter: adapter,
 		mapAccessor: newRefValMapAccessor(value),
 		value:       value,
 		size:        len(value),
@@ -68,9 +67,9 @@ func NewRefValMap(adapter Adapter, value map[ref.Val]ref.Val) traits.Mapper {
 }
 
 // NewStringInterfaceMap returns a specialized traits.Mapper with string keys and interface values.
-func NewStringInterfaceMap(adapter Adapter, value map[string]any) traits.Mapper {
+func NewStringInterfaceMap(adapter ref.TypeAdapter, value map[string]any) traits.Mapper {
 	return &baseMap{
-		Adapter:     adapter,
+		TypeAdapter: adapter,
 		mapAccessor: newStringIfaceMapAccessor(adapter, value),
 		value:       value,
 		size:        len(value),
@@ -78,9 +77,9 @@ func NewStringInterfaceMap(adapter Adapter, value map[string]any) traits.Mapper 
 }
 
 // NewStringStringMap returns a specialized traits.Mapper with string keys and values.
-func NewStringStringMap(adapter Adapter, value map[string]string) traits.Mapper {
+func NewStringStringMap(adapter ref.TypeAdapter, value map[string]string) traits.Mapper {
 	return &baseMap{
-		Adapter:     adapter,
+		TypeAdapter: adapter,
 		mapAccessor: newStringMapAccessor(value),
 		value:       value,
 		size:        len(value),
@@ -88,30 +87,21 @@ func NewStringStringMap(adapter Adapter, value map[string]string) traits.Mapper 
 }
 
 // NewProtoMap returns a specialized traits.Mapper for handling protobuf map values.
-func NewProtoMap(adapter Adapter, value *pb.Map) traits.Mapper {
+func NewProtoMap(adapter ref.TypeAdapter, value *pb.Map) traits.Mapper {
 	return &protoMap{
-		Adapter: adapter,
-		value:   value,
+		TypeAdapter: adapter,
+		value:       value,
 	}
 }
 
-// NewMutableMap constructs a mutable map from an adapter and a set of map values.
-func NewMutableMap(adapter Adapter, mutableValues map[ref.Val]ref.Val) traits.MutableMapper {
-	mutableCopy := make(map[ref.Val]ref.Val, len(mutableValues))
-	for k, v := range mutableValues {
-		mutableCopy[k] = v
-	}
-	m := &mutableMap{
-		baseMap: &baseMap{
-			Adapter:     adapter,
-			mapAccessor: newRefValMapAccessor(mutableCopy),
-			value:       mutableCopy,
-			size:        len(mutableCopy),
-		},
-		mutableValues: mutableCopy,
-	}
-	return m
-}
+var (
+	// MapType singleton.
+	MapType = NewTypeValue("map",
+		traits.ContainerType,
+		traits.IndexerType,
+		traits.IterableType,
+		traits.SizerType)
+)
 
 // mapAccessor is a private interface for finding values within a map and iterating over the keys.
 // This interface implements portions of the API surface area required by the traits.Mapper
@@ -124,9 +114,6 @@ type mapAccessor interface {
 
 	// Iterator returns an Iterator over the map key set.
 	Iterator() traits.Iterator
-
-	// Fold calls the FoldEntry method for each (key, value) pair in the map.
-	Fold(traits.Folder)
 }
 
 // baseMap is a reflection based map implementation designed to handle a variety of map-like types.
@@ -134,7 +121,7 @@ type mapAccessor interface {
 // Since CEL is side-effect free, the base map represents an immutable object.
 type baseMap struct {
 	// TypeAdapter used to convert keys and values accessed within the map.
-	Adapter
+	ref.TypeAdapter
 
 	// mapAccessor interface implementation used to find and iterate over map keys.
 	mapAccessor
@@ -319,41 +306,6 @@ func (m *baseMap) String() string {
 	return sb.String()
 }
 
-type baseMapEntry struct {
-	key string
-	val string
-}
-
-func formatMap(m traits.Mapper, sb *strings.Builder) {
-	it := m.Iterator()
-	var ents []baseMapEntry
-	if s, ok := m.Size().(Int); ok {
-		ents = make([]baseMapEntry, 0, int(s))
-	}
-	for it.HasNext() == True {
-		k := it.Next()
-		v, _ := m.Find(k)
-		ents = append(ents, baseMapEntry{Format(k), Format(v)})
-	}
-	sort.SliceStable(ents, func(i, j int) bool {
-		return ents[i].key < ents[j].key
-	})
-	sb.WriteString("{")
-	for i, ent := range ents {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		sb.WriteString(ent.key)
-		sb.WriteString(": ")
-		sb.WriteString(ent.val)
-	}
-	sb.WriteString("}")
-}
-
-func (m *baseMap) format(sb *strings.Builder) {
-	formatMap(m, sb)
-}
-
 // Type implements the ref.Val interface method.
 func (m *baseMap) Type() ref.Type {
 	return MapType
@@ -364,37 +316,15 @@ func (m *baseMap) Value() any {
 	return m.value
 }
 
-// mutableMap holds onto a set of mutable values which are used for intermediate computations.
-type mutableMap struct {
-	*baseMap
-	mutableValues map[ref.Val]ref.Val
-}
-
-// Insert implements the traits.MutableMapper interface method, returning true if the key insertion
-// succeeds.
-func (m *mutableMap) Insert(k, v ref.Val) ref.Val {
-	if _, found := m.Find(k); found {
-		return NewErr("insert failed: key %v already exists", k)
-	}
-	m.mutableValues[k] = v
-	return m
-}
-
-// ToImmutableMap implements the traits.MutableMapper interface method, converting a mutable map
-// an immutable map implementation.
-func (m *mutableMap) ToImmutableMap() traits.Mapper {
-	return NewRefValMap(m.Adapter, m.mutableValues)
-}
-
-func newJSONStructAccessor(adapter Adapter, st map[string]*structpb.Value) mapAccessor {
+func newJSONStructAccessor(adapter ref.TypeAdapter, st map[string]*structpb.Value) mapAccessor {
 	return &jsonStructAccessor{
-		Adapter: adapter,
-		st:      st,
+		TypeAdapter: adapter,
+		st:          st,
 	}
 }
 
 type jsonStructAccessor struct {
-	Adapter
+	ref.TypeAdapter
 	st map[string]*structpb.Value
 }
 
@@ -429,26 +359,17 @@ func (a *jsonStructAccessor) Iterator() traits.Iterator {
 	}
 }
 
-// Fold calls the FoldEntry method for each (key, value) pair in the map.
-func (a *jsonStructAccessor) Fold(f traits.Folder) {
-	for k, v := range a.st {
-		if !f.FoldEntry(k, v) {
-			break
-		}
-	}
-}
-
-func newReflectMapAccessor(adapter Adapter, value reflect.Value) mapAccessor {
+func newReflectMapAccessor(adapter ref.TypeAdapter, value reflect.Value) mapAccessor {
 	keyType := value.Type().Key()
 	return &reflectMapAccessor{
-		Adapter:  adapter,
-		refValue: value,
-		keyType:  keyType,
+		TypeAdapter: adapter,
+		refValue:    value,
+		keyType:     keyType,
 	}
 }
 
 type reflectMapAccessor struct {
-	Adapter
+	ref.TypeAdapter
 	refValue reflect.Value
 	keyType  reflect.Type
 }
@@ -506,19 +427,9 @@ func (m *reflectMapAccessor) findInternal(key ref.Val) (ref.Val, bool) {
 // Iterator creates a Golang reflection based traits.Iterator.
 func (m *reflectMapAccessor) Iterator() traits.Iterator {
 	return &mapIterator{
-		Adapter: m.Adapter,
-		mapKeys: m.refValue.MapRange(),
-		len:     m.refValue.Len(),
-	}
-}
-
-// Fold calls the FoldEntry method for each (key, value) pair in the map.
-func (m *reflectMapAccessor) Fold(f traits.Folder) {
-	mapRange := m.refValue.MapRange()
-	for mapRange.Next() {
-		if !f.FoldEntry(mapRange.Key().Interface(), mapRange.Value().Interface()) {
-			break
-		}
+		TypeAdapter: m.TypeAdapter,
+		mapKeys:     m.refValue.MapRange(),
+		len:         m.refValue.Len(),
 	}
 }
 
@@ -569,18 +480,9 @@ func (a *refValMapAccessor) Find(key ref.Val) (ref.Val, bool) {
 // Iterator produces a new traits.Iterator which iterates over the map keys via Golang reflection.
 func (a *refValMapAccessor) Iterator() traits.Iterator {
 	return &mapIterator{
-		Adapter: DefaultTypeAdapter,
-		mapKeys: reflect.ValueOf(a.mapVal).MapRange(),
-		len:     len(a.mapVal),
-	}
-}
-
-// Fold calls the FoldEntry method for each (key, value) pair in the map.
-func (a *refValMapAccessor) Fold(f traits.Folder) {
-	for k, v := range a.mapVal {
-		if !f.FoldEntry(k, v) {
-			break
-		}
+		TypeAdapter: DefaultTypeAdapter,
+		mapKeys:     reflect.ValueOf(a.mapVal).MapRange(),
+		len:         len(a.mapVal),
 	}
 }
 
@@ -622,24 +524,15 @@ func (a *stringMapAccessor) Iterator() traits.Iterator {
 	}
 }
 
-// Fold calls the FoldEntry method for each (key, value) pair in the map.
-func (a *stringMapAccessor) Fold(f traits.Folder) {
-	for k, v := range a.mapVal {
-		if !f.FoldEntry(k, v) {
-			break
-		}
-	}
-}
-
-func newStringIfaceMapAccessor(adapter Adapter, mapVal map[string]any) mapAccessor {
+func newStringIfaceMapAccessor(adapter ref.TypeAdapter, mapVal map[string]any) mapAccessor {
 	return &stringIfaceMapAccessor{
-		Adapter: adapter,
-		mapVal:  mapVal,
+		TypeAdapter: adapter,
+		mapVal:      mapVal,
 	}
 }
 
 type stringIfaceMapAccessor struct {
-	Adapter
+	ref.TypeAdapter
 	mapVal map[string]any
 }
 
@@ -673,19 +566,10 @@ func (a *stringIfaceMapAccessor) Iterator() traits.Iterator {
 	}
 }
 
-// Fold calls the FoldEntry method for each (key, value) pair in the map.
-func (a *stringIfaceMapAccessor) Fold(f traits.Folder) {
-	for k, v := range a.mapVal {
-		if !f.FoldEntry(k, v) {
-			break
-		}
-	}
-}
-
 // protoMap is a specialized, separate implementation of the traits.Mapper interfaces tailored to
 // accessing protoreflect.Map values.
 type protoMap struct {
-	Adapter
+	ref.TypeAdapter
 	value *pb.Map
 }
 
@@ -888,17 +772,10 @@ func (m *protoMap) Iterator() traits.Iterator {
 		return true
 	})
 	return &protoMapIterator{
-		Adapter: m.Adapter,
-		mapKeys: mapKeys,
-		len:     m.value.Len(),
+		TypeAdapter: m.TypeAdapter,
+		mapKeys:     mapKeys,
+		len:         m.value.Len(),
 	}
-}
-
-// Fold calls the FoldEntry method for each (key, value) pair in the map.
-func (m *protoMap) Fold(f traits.Folder) {
-	m.value.Range(func(k protoreflect.MapKey, v protoreflect.Value) bool {
-		return f.FoldEntry(k.Interface(), v.Interface())
-	})
 }
 
 // Size returns the number of entries in the protoreflect.Map.
@@ -918,7 +795,7 @@ func (m *protoMap) Value() any {
 
 type mapIterator struct {
 	*baseIterator
-	Adapter
+	ref.TypeAdapter
 	mapKeys *reflect.MapIter
 	cursor  int
 	len     int
@@ -941,7 +818,7 @@ func (it *mapIterator) Next() ref.Val {
 
 type protoMapIterator struct {
 	*baseIterator
-	Adapter
+	ref.TypeAdapter
 	mapKeys []protoreflect.MapKey
 	cursor  int
 	len     int
@@ -983,56 +860,4 @@ func (it *stringKeyIterator) Next() ref.Val {
 		return String(it.mapKeys[index])
 	}
 	return nil
-}
-
-// ToFoldableMap will create a Foldable version of a map suitable for key-value pair iteration.
-//
-// For values which are already Foldable, this call is a no-op. For all other values, the fold
-// is driven via the Iterator HasNext() and Next() calls as well as the map's Get() method
-// which means that the folding will function, but take a performance hit.
-func ToFoldableMap(m traits.Mapper) traits.Foldable {
-	if f, ok := m.(traits.Foldable); ok {
-		return f
-	}
-	return interopFoldableMap{Mapper: m}
-}
-
-type interopFoldableMap struct {
-	traits.Mapper
-}
-
-func (m interopFoldableMap) Fold(f traits.Folder) {
-	it := m.Iterator()
-	for it.HasNext() == True {
-		k := it.Next()
-		if !f.FoldEntry(k, m.Get(k)) {
-			break
-		}
-	}
-}
-
-// InsertMapKeyValue inserts a key, value pair into the target map if the target map does not
-// already contain the given key.
-//
-// If the map is mutable, it is modified in-place per the MutableMapper contract.
-// If the map is not mutable, a copy containing the new key, value pair is made.
-func InsertMapKeyValue(m traits.Mapper, k, v ref.Val) ref.Val {
-	if mutable, ok := m.(traits.MutableMapper); ok {
-		return mutable.Insert(k, v)
-	}
-
-	// Otherwise perform the slow version of the insertion which makes a copy of the incoming map.
-	if _, found := m.Find(k); !found {
-		size := m.Size().(Int)
-		copy := make(map[ref.Val]ref.Val, size+1)
-		copy[k] = v
-		it := m.Iterator()
-		for it.HasNext() == True {
-			nextK := it.Next()
-			nextV := m.Get(nextK)
-			copy[nextK] = nextV
-		}
-		return DefaultTypeAdapter.NativeToValue(copy)
-	}
-	return NewErr("insert failed: key %v already exists", k)
 }

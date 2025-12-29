@@ -17,7 +17,6 @@ limitations under the License.
 package podlifetime
 
 import (
-	"fmt"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
@@ -27,7 +26,7 @@ func TestValidateRemovePodLifeTimeArgs(t *testing.T) {
 	testCases := []struct {
 		description string
 		args        *PodLifeTimeArgs
-		errInfo     error
+		expectError bool
 	}{
 		{
 			description: "valid arg, no errors",
@@ -35,55 +34,31 @@ func TestValidateRemovePodLifeTimeArgs(t *testing.T) {
 				MaxPodLifeTimeSeconds: func(i uint) *uint { return &i }(1),
 				States:                []string{string(v1.PodRunning)},
 			},
-		},
-		{
-			description: "Pod Status Reasons Succeeded or Failed",
-			args: &PodLifeTimeArgs{
-				MaxPodLifeTimeSeconds: func(i uint) *uint { return &i }(1),
-				States:                []string{string(v1.PodSucceeded), string(v1.PodFailed)},
-			},
-		},
-		{
-			description: "Pod Status Reasons CrashLoopBackOff ",
-			args: &PodLifeTimeArgs{
-				MaxPodLifeTimeSeconds: func(i uint) *uint { return &i }(1),
-				States:                []string{"CrashLoopBackOff"},
-			},
+			expectError: false,
 		},
 		{
 			description: "nil MaxPodLifeTimeSeconds arg, expects errors",
 			args: &PodLifeTimeArgs{
 				MaxPodLifeTimeSeconds: nil,
 			},
-			errInfo: fmt.Errorf("MaxPodLifeTimeSeconds not set"),
+			expectError: true,
 		},
 		{
 			description: "invalid pod state arg, expects errors",
 			args: &PodLifeTimeArgs{
-				MaxPodLifeTimeSeconds: func(i uint) *uint { return &i }(1),
-				States:                []string{string("InvalidState")},
+				States: []string{string(v1.NodeRunning)},
 			},
-			errInfo: fmt.Errorf("states must be one of [ContainerCreating CrashLoopBackOff CreateContainerConfigError CreateContainerError ErrImagePull Failed ImagePullBackOff InvalidImageName NodeAffinity NodeLost Pending PodInitializing Running Shutdown Succeeded UnexpectedAdmissionError Unknown]"),
-		},
-		{
-			description: "nil MaxPodLifeTimeSeconds arg and invalid pod state arg, expects errors",
-			args: &PodLifeTimeArgs{
-				MaxPodLifeTimeSeconds: nil,
-				States:                []string{string("InvalidState")},
-			},
-			errInfo: fmt.Errorf("[MaxPodLifeTimeSeconds not set, states must be one of [ContainerCreating CrashLoopBackOff CreateContainerConfigError CreateContainerError ErrImagePull Failed ImagePullBackOff InvalidImageName NodeAffinity NodeLost Pending PodInitializing Running Shutdown Succeeded UnexpectedAdmissionError Unknown]]"),
+			expectError: true,
 		},
 	}
 
-	for _, testCase := range testCases {
-		t.Run(testCase.description, func(t *testing.T) {
-			validateErr := ValidatePodLifeTimeArgs(testCase.args)
-			if validateErr == nil || testCase.errInfo == nil {
-				if validateErr != testCase.errInfo {
-					t.Errorf("expected validity of plugin config: %q but got %q instead", testCase.errInfo, validateErr)
-				}
-			} else if validateErr.Error() != testCase.errInfo.Error() {
-				t.Errorf("expected validity of plugin config: %q but got %q instead", testCase.errInfo, validateErr)
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			err := ValidatePodLifeTimeArgs(tc.args)
+
+			hasError := err != nil
+			if tc.expectError != hasError {
+				t.Error("unexpected arg validation behavior")
 			}
 		})
 	}

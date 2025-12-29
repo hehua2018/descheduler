@@ -24,10 +24,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 
 	"sigs.k8s.io/descheduler/pkg/descheduler/evictions"
-	"sigs.k8s.io/descheduler/pkg/descheduler/metricscollector"
 	podutil "sigs.k8s.io/descheduler/pkg/descheduler/pod"
-
-	promapi "github.com/prometheus/client_golang/api"
 )
 
 // Handle provides handles used by plugins to retrieve a kubernetes client set,
@@ -36,11 +33,9 @@ import (
 type Handle interface {
 	// ClientSet returns a kubernetes clientSet.
 	ClientSet() clientset.Interface
-	PrometheusClient() promapi.Client
 	Evictor() Evictor
 	GetPodsAssignedToNodeFunc() podutil.GetPodsAssignedToNodeFunc
 	SharedInformerFactory() informers.SharedInformerFactory
-	MetricsCollector() *metricscollector.MetricsCollector
 }
 
 // Evictor defines an interface for filtering and evicting pods
@@ -51,7 +46,9 @@ type Evictor interface {
 	// PreEvictionFilter checks if pod can be evicted right before eviction
 	PreEvictionFilter(*v1.Pod) bool
 	// Evict evicts a pod (no pre-check performed)
-	Evict(context.Context, *v1.Pod, evictions.EvictOptions) error
+	Evict(context.Context, *v1.Pod, evictions.EvictOptions) bool
+	// NodeLimitExceeded checks if the number of evictions for a node was exceeded
+	NodeLimitExceeded(node *v1.Node) bool
 }
 
 // Status describes result of an extension point invocation

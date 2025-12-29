@@ -19,7 +19,6 @@ package removepodshavingtoomanyrestarts
 import (
 	"context"
 	"fmt"
-	"sort"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,7 +36,6 @@ const PluginName = "RemovePodsHavingTooManyRestarts"
 // There are too many cases leading this issue: Volume mount failed, app error due to nodes' different settings.
 // As of now, this strategy won't evict daemonsets, mirror pods, critical pods and pods with local storages.
 type RemovePodsHavingTooManyRestarts struct {
-	logger    klog.Logger
 	handle    frameworktypes.Handle
 	args      *RemovePodsHavingTooManyRestartsArgs
 	podFilter podutil.FilterFunc
@@ -46,12 +44,11 @@ type RemovePodsHavingTooManyRestarts struct {
 var _ frameworktypes.DeschedulePlugin = &RemovePodsHavingTooManyRestarts{}
 
 // New builds plugin from its arguments while passing a handle
-func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle) (frameworktypes.Plugin, error) {
+func New(args runtime.Object, handle frameworktypes.Handle) (frameworktypes.Plugin, error) {
 	tooManyRestartsArgs, ok := args.(*RemovePodsHavingTooManyRestartsArgs)
 	if !ok {
 		return nil, fmt.Errorf("want args to be of type RemovePodsHavingTooManyRestartsArgs, got %T", args)
 	}
-	logger := klog.FromContext(ctx).WithValues("plugin", PluginName)
 
 	var includedNamespaces, excludedNamespaces sets.Set[string]
 	if tooManyRestartsArgs.Namespaces != nil {
@@ -72,7 +69,7 @@ func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle)
 
 	podFilter = podutil.WrapFilterFuncs(podFilter, func(pod *v1.Pod) bool {
 		if err := validateCanEvict(pod, tooManyRestartsArgs); err != nil {
-			logger.V(4).Info(fmt.Sprintf("ignoring pod for eviction due to: %s", err.Error()), "pod", klog.KObj(pod))
+			klog.V(4).InfoS(fmt.Sprintf("ignoring pod for eviction due to: %s", err.Error()), "pod", klog.KObj(pod))
 			return false
 		}
 		return true
@@ -85,13 +82,7 @@ func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle)
 				return true
 			}
 
-			containerStatuses := pod.Status.ContainerStatuses
-
-			if tooManyRestartsArgs.IncludingInitContainers {
-				containerStatuses = append(containerStatuses, pod.Status.InitContainerStatuses...)
-			}
-
-			for _, containerStatus := range containerStatuses {
+			for _, containerStatus := range pod.Status.ContainerStatuses {
 				if containerStatus.State.Waiting != nil && states.Has(containerStatus.State.Waiting.Reason) {
 					return true
 				}
@@ -102,7 +93,6 @@ func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle)
 	}
 
 	return &RemovePodsHavingTooManyRestarts{
-		logger:    logger,
 		handle:    handle,
 		args:      tooManyRestartsArgs,
 		podFilter: podFilter,
@@ -116,9 +106,8 @@ func (d *RemovePodsHavingTooManyRestarts) Name() string {
 
 // Deschedule extension point implementation for the plugin
 func (d *RemovePodsHavingTooManyRestarts) Deschedule(ctx context.Context, nodes []*v1.Node) *frameworktypes.Status {
-	logger := klog.FromContext(klog.NewContext(ctx, d.logger)).WithValues("ExtensionPoint", frameworktypes.DescheduleExtensionPoint)
 	for _, node := range nodes {
-		logger.V(2).Info("Processing node", "node", klog.KObj(node))
+		klog.V(2).InfoS("Processing node", "node", klog.KObj(node))
 		pods, err := podutil.ListAllPodsOnANode(node.Name, d.handle.GetPodsAssignedToNodeFunc(), d.podFilter)
 		if err != nil {
 			// no pods evicted as error encountered retrieving evictable Pods
@@ -126,29 +115,11 @@ func (d *RemovePodsHavingTooManyRestarts) Deschedule(ctx context.Context, nodes 
 				Err: fmt.Errorf("error listing pods on a node: %v", err),
 			}
 		}
-
-		podRestarts := make(map[*v1.Pod]int32)
-		for _, pod := range pods {
-			podRestarts[pod] = getPodTotalRestarts(pod, d.args.IncludingInitContainers)
-		}
-		// sort pods by restarts count
-		sort.Slice(pods, func(i, j int) bool {
-			return podRestarts[pods[i]] > podRestarts[pods[j]]
-		})
 		totalPods := len(pods)
-	loop:
 		for i := 0; i < totalPods; i++ {
-			err := d.handle.Evictor().Evict(ctx, pods[i], evictions.EvictOptions{StrategyName: PluginName})
-			if err == nil {
-				continue
-			}
-			switch err.(type) {
-			case *evictions.EvictionNodeLimitError:
-				break loop
-			case *evictions.EvictionTotalLimitError:
-				return nil
-			default:
-				logger.Error(err, "eviction failed")
+			d.handle.Evictor().Evict(ctx, pods[i], evictions.EvictOptions{})
+			if d.handle.Evictor().NodeLimitExceeded(node) {
+				break
 			}
 		}
 	}
@@ -159,7 +130,11 @@ func (d *RemovePodsHavingTooManyRestarts) Deschedule(ctx context.Context, nodes 
 func validateCanEvict(pod *v1.Pod, tooManyRestartsArgs *RemovePodsHavingTooManyRestartsArgs) error {
 	var err error
 
-	restarts := getPodTotalRestarts(pod, tooManyRestartsArgs.IncludingInitContainers)
+	restarts := calcContainerRestartsFromStatuses(pod.Status.ContainerStatuses)
+	if tooManyRestartsArgs.IncludingInitContainers {
+		restarts += calcContainerRestartsFromStatuses(pod.Status.InitContainerStatuses)
+	}
+
 	if restarts < tooManyRestartsArgs.PodRestartThreshold {
 		err = fmt.Errorf("number of container restarts (%v) not exceeding the threshold", restarts)
 	}
@@ -172,15 +147,6 @@ func calcContainerRestartsFromStatuses(statuses []v1.ContainerStatus) int32 {
 	var restarts int32
 	for _, cs := range statuses {
 		restarts += cs.RestartCount
-	}
-	return restarts
-}
-
-// getPodTotalRestarts get total restarts of a pod.
-func getPodTotalRestarts(pod *v1.Pod, includeInitContainers bool) int32 {
-	restarts := calcContainerRestartsFromStatuses(pod.Status.ContainerStatuses)
-	if includeInitContainers {
-		restarts += calcContainerRestartsFromStatuses(pod.Status.InitContainerStatuses)
 	}
 	return restarts
 }

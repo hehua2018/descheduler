@@ -19,7 +19,6 @@ package descheduler
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -29,6 +28,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"sigs.k8s.io/descheduler/pkg/api"
+	"sigs.k8s.io/descheduler/pkg/api/v1alpha1"
 	"sigs.k8s.io/descheduler/pkg/api/v1alpha2"
 	"sigs.k8s.io/descheduler/pkg/descheduler/scheme"
 	"sigs.k8s.io/descheduler/pkg/framework/pluginregistry"
@@ -54,7 +54,7 @@ func decode(policyConfigFile string, policy []byte, client clientset.Interface, 
 	internalPolicy := &api.DeschedulerPolicy{}
 	var err error
 
-	decoder := scheme.Codecs.UniversalDecoder(v1alpha2.SchemeGroupVersion, api.SchemeGroupVersion)
+	decoder := scheme.Codecs.UniversalDecoder(v1alpha1.SchemeGroupVersion, v1alpha2.SchemeGroupVersion, api.SchemeGroupVersion)
 	if err := runtime.DecodeInto(decoder, policy, internalPolicy); err != nil {
 		return nil, fmt.Errorf("failed decoding descheduler's policy config %q: %v", policyConfigFile, err)
 	}
@@ -63,22 +63,21 @@ func decode(policyConfigFile string, policy []byte, client clientset.Interface, 
 	if err != nil {
 		return nil, err
 	}
-	return setDefaults(*internalPolicy, registry, client)
+
+	setDefaults(*internalPolicy, registry, client)
+
+	return internalPolicy, nil
 }
 
-func setDefaults(in api.DeschedulerPolicy, registry pluginregistry.Registry, client clientset.Interface) (*api.DeschedulerPolicy, error) {
-	var err error
+func setDefaults(in api.DeschedulerPolicy, registry pluginregistry.Registry, client clientset.Interface) *api.DeschedulerPolicy {
 	for idx, profile := range in.Profiles {
 		// If we need to set defaults coming from loadtime in each profile we do it here
-		in.Profiles[idx], err = setDefaultEvictor(profile, client)
-		if err != nil {
-			return nil, err
-		}
+		in.Profiles[idx] = setDefaultEvictor(profile, client)
 		for _, pluginConfig := range profile.PluginConfigs {
 			setDefaultsPluginConfig(&pluginConfig, registry)
 		}
 	}
-	return &in, nil
+	return &in
 }
 
 func setDefaultsPluginConfig(pluginConfig *api.PluginConfig, registry pluginregistry.Registry) {
@@ -99,7 +98,7 @@ func findPluginName(names []string, key string) bool {
 	return false
 }
 
-func setDefaultEvictor(profile api.DeschedulerProfile, client clientset.Interface) (api.DeschedulerProfile, error) {
+func setDefaultEvictor(profile api.DeschedulerProfile, client clientset.Interface) api.DeschedulerProfile {
 	newPluginConfig := api.PluginConfig{
 		Name: defaultevictor.PluginName,
 		Args: &defaultevictor.DefaultEvictorArgs{
@@ -107,11 +106,6 @@ func setDefaultEvictor(profile api.DeschedulerProfile, client clientset.Interfac
 			EvictSystemCriticalPods: false,
 			IgnorePvcPods:           false,
 			EvictFailedBarePods:     false,
-			IgnorePodsWithoutPDB:    false,
-			PodProtections: defaultevictor.PodProtections{
-				DefaultDisabled: []defaultevictor.PodProtection{},
-				ExtraEnabled:    []defaultevictor.PodProtection{},
-			},
 		},
 	}
 
@@ -134,19 +128,18 @@ func setDefaultEvictor(profile api.DeschedulerProfile, client clientset.Interfac
 	thresholdPriority, err := utils.GetPriorityValueFromPriorityThreshold(context.TODO(), client, defaultevictorPluginConfig.Args.(*defaultevictor.DefaultEvictorArgs).PriorityThreshold)
 	if err != nil {
 		klog.Error(err, "Failed to get threshold priority from args")
-		return profile, err
 	}
 	profile.PluginConfigs[idx].Args.(*defaultevictor.DefaultEvictorArgs).PriorityThreshold = &api.PriorityThreshold{}
 	profile.PluginConfigs[idx].Args.(*defaultevictor.DefaultEvictorArgs).PriorityThreshold.Value = &thresholdPriority
-	return profile, nil
+	return profile
 }
 
 func validateDeschedulerConfiguration(in api.DeschedulerPolicy, registry pluginregistry.Registry) error {
-	var errorsInPolicy []error
+	var errorsInProfiles []error
 	for _, profile := range in.Profiles {
 		for _, pluginConfig := range profile.PluginConfigs {
 			if _, ok := registry[pluginConfig.Name]; !ok {
-				errorsInPolicy = append(errorsInPolicy, fmt.Errorf("in profile %s: plugin %s in pluginConfig not registered", profile.Name, pluginConfig.Name))
+				errorsInProfiles = append(errorsInProfiles, fmt.Errorf("in profile %s: plugin %s in pluginConfig not registered", profile.Name, pluginConfig.Name))
 				continue
 			}
 
@@ -155,41 +148,9 @@ func validateDeschedulerConfiguration(in api.DeschedulerPolicy, registry pluginr
 				continue
 			}
 			if err := pluginUtilities.PluginArgValidator(pluginConfig.Args); err != nil {
-				errorsInPolicy = append(errorsInPolicy, fmt.Errorf("in profile %s: %s", profile.Name, err.Error()))
+				errorsInProfiles = append(errorsInProfiles, fmt.Errorf("in profile %s: %s", profile.Name, err.Error()))
 			}
 		}
 	}
-	providers := map[api.MetricsSource]api.MetricsProvider{}
-	for _, provider := range in.MetricsProviders {
-		if _, ok := providers[provider.Source]; ok {
-			errorsInPolicy = append(errorsInPolicy, fmt.Errorf("metric provider %q is already configured, each source can be configured only once", provider.Source))
-		} else {
-			providers[provider.Source] = provider
-		}
-	}
-	if _, exists := providers[api.KubernetesMetrics]; exists && in.MetricsCollector != nil && in.MetricsCollector.Enabled {
-		errorsInPolicy = append(errorsInPolicy, fmt.Errorf("it is not allowed to combine metrics provider when metrics collector is enabled"))
-	}
-	if prometheusConfig, exists := providers[api.PrometheusMetrics]; exists {
-		if prometheusConfig.Prometheus == nil {
-			errorsInPolicy = append(errorsInPolicy, fmt.Errorf("prometheus configuration is required when prometheus source is enabled"))
-		} else {
-			if prometheusConfig.Prometheus.URL == "" {
-				errorsInPolicy = append(errorsInPolicy, fmt.Errorf("prometheus URL is required when prometheus is enabled"))
-			} else if _, err := url.Parse(prometheusConfig.Prometheus.URL); err != nil {
-				errorsInPolicy = append(errorsInPolicy, fmt.Errorf("error parsing prometheus URL: %v", err))
-			}
-
-			if prometheusConfig.Prometheus.AuthToken != nil {
-				secretRef := prometheusConfig.Prometheus.AuthToken.SecretReference
-				if secretRef == nil {
-					errorsInPolicy = append(errorsInPolicy, fmt.Errorf("prometheus authToken secret is expected to be set when authToken field is"))
-				} else if secretRef.Name == "" || secretRef.Namespace == "" {
-					errorsInPolicy = append(errorsInPolicy, fmt.Errorf("prometheus authToken secret reference does not set both namespace and name"))
-				}
-			}
-		}
-	}
-
-	return utilerrors.NewAggregate(errorsInPolicy)
+	return utilerrors.NewAggregate(errorsInProfiles)
 }

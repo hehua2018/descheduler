@@ -37,26 +37,6 @@ type DeschedulerPolicy struct {
 
 	// MaxNoOfPodsToEvictPerNamespace restricts maximum of pods to be evicted per namespace.
 	MaxNoOfPodsToEvictPerNamespace *uint `json:"maxNoOfPodsToEvictPerNamespace,omitempty"`
-
-	// MaxNoOfPodsToTotal restricts maximum of pods to be evicted total.
-	MaxNoOfPodsToEvictTotal *uint `json:"maxNoOfPodsToEvictTotal,omitempty"`
-
-	// EvictionFailureEventNotification should be set to true to enable eviction failure event notification.
-	// Default is false.
-	EvictionFailureEventNotification *bool `json:"evictionFailureEventNotification,omitempty"`
-
-	// MetricsCollector configures collection of metrics for actual resource utilization
-	// Deprecated. Use MetricsProviders field instead.
-	MetricsCollector *MetricsCollector `json:"metricsCollector,omitempty"`
-
-	// MetricsProviders configure collection of metrics about actual resource utilization from various sources
-	MetricsProviders []MetricsProvider `json:"metricsProviders,omitempty"`
-
-	// GracePeriodSeconds The duration in seconds before the object should be deleted. Value must be non-negative integer.
-	// The value zero indicates delete immediately. If this value is nil, the default grace period for the
-	// specified type will be used.
-	// Defaults to a per object value if not specified. zero means delete immediately.
-	GracePeriodSeconds *int64 `json:"gracePeriodSeconds,omitempty"`
 }
 
 type DeschedulerProfile struct {
@@ -82,53 +62,4 @@ type PluginConfig struct {
 type PluginSet struct {
 	Enabled  []string `json:"enabled"`
 	Disabled []string `json:"disabled"`
-}
-
-type MetricsSource string
-
-const (
-	// KubernetesMetrics enables metrics from a Kubernetes metrics server.
-	// Please see https://kubernetes-sigs.github.io/metrics-server/ for more.
-	KubernetesMetrics MetricsSource = "KubernetesMetrics"
-
-	// KubernetesMetrics enables metrics from a Prometheus metrics server.
-	PrometheusMetrics MetricsSource = "Prometheus"
-)
-
-// MetricsCollector configures collection of metrics about actual resource utilization
-type MetricsCollector struct {
-	// Enabled metrics collection from Kubernetes metrics server.
-	// Deprecated. Use MetricsProvider.Source field instead.
-	Enabled bool `json:"enabled,omitempty"`
-}
-
-// MetricsProvider configures collection of metrics about actual resource utilization from a given source
-type MetricsProvider struct {
-	// Source enables metrics from Kubernetes metrics server.
-	Source MetricsSource `json:"source,omitempty"`
-
-	// Prometheus enables metrics collection through Prometheus
-	Prometheus *Prometheus `json:"prometheus,omitempty"`
-}
-
-type Prometheus struct {
-	URL string `json:"url,omitempty"`
-	// authToken used for authentication with the prometheus server.
-	// If not set the in cluster authentication token for the descheduler service
-	// account is read from the container's file system.
-	AuthToken *AuthToken `json:"authToken,omitempty"`
-}
-
-type AuthToken struct {
-	// secretReference references an authentication token.
-	// secrets are expected to be created under the descheduler's namespace.
-	SecretReference *SecretReference `json:"secretReference,omitempty"`
-}
-
-// SecretReference holds a reference to a Secret
-type SecretReference struct {
-	// namespace is the namespace of the secret.
-	Namespace string `json:"namespace,omitempty"`
-	// name is the name of the secret.
-	Name string `json:"name,omitempty"`
 }

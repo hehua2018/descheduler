@@ -3,21 +3,26 @@ package removepodsviolatingtopologyspreadconstraint
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"sort"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	policy "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
-	utilptr "k8s.io/utils/ptr"
+	core "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/events"
+	utilpointer "k8s.io/utils/pointer"
 
 	"sigs.k8s.io/descheduler/pkg/api"
+	"sigs.k8s.io/descheduler/pkg/descheduler/evictions"
+	podutil "sigs.k8s.io/descheduler/pkg/descheduler/pod"
+	frameworkfake "sigs.k8s.io/descheduler/pkg/framework/fake"
 	"sigs.k8s.io/descheduler/pkg/framework/plugins/defaultevictor"
-	frameworktesting "sigs.k8s.io/descheduler/pkg/framework/testing"
 	frameworktypes "sigs.k8s.io/descheduler/pkg/framework/types"
 	"sigs.k8s.io/descheduler/test"
 )
@@ -1200,7 +1205,7 @@ func TestTopologySpreadConstraint(t *testing.T) {
 			}),
 			expectedEvictedCount: 1,
 			namespaces:           []string{"ns1"},
-			args:                 RemovePodsViolatingTopologySpreadConstraintArgs{TopologyBalanceNodeFit: utilptr.To(false)},
+			args:                 RemovePodsViolatingTopologySpreadConstraintArgs{TopologyBalanceNodeFit: utilpointer.Bool(false)},
 			nodeFit:              true,
 		},
 		{
@@ -1397,63 +1402,6 @@ func TestTopologySpreadConstraint(t *testing.T) {
 			args:                 RemovePodsViolatingTopologySpreadConstraintArgs{},
 			nodeFit:              true,
 		},
-		{
-			name: "3 domains, sizes [2, 1, 0] with selectors, maxSkew=1, nodeTaintsPolicy=Ignore, should move 1 for [1, 1, 1]",
-			nodes: []*v1.Node{
-				test.BuildTestNode("A1", 1000, 2000, 9, func(n *v1.Node) {
-					n.Labels["zone"] = "zoneA"
-					n.Labels[v1.LabelArchStable] = "arm64"
-				}),
-				test.BuildTestNode("B1", 1000, 2000, 9, func(n *v1.Node) {
-					n.Labels["zone"] = "zoneB"
-					n.Labels[v1.LabelArchStable] = "arm64"
-				}),
-				test.BuildTestNode("C1", 1000, 2000, 9, func(n *v1.Node) {
-					n.Labels["zone"] = "zoneC"
-					n.Labels[v1.LabelArchStable] = "arm64"
-				}),
-			},
-			pods: createTestPods([]testPodList{
-				{
-					count:  1,
-					node:   "A1",
-					labels: map[string]string{"foo": "bar"},
-					constraints: getDefaultTopologyConstraints(1, func(constraint *v1.TopologySpreadConstraint) {
-						constraint.NodeAffinityPolicy = utilptr.To(v1.NodeInclusionPolicyIgnore)
-					}),
-					nodeSelector: map[string]string{
-						v1.LabelArchStable: "arm64",
-					},
-				},
-				{
-					count:  1,
-					node:   "A1",
-					labels: map[string]string{"foo": "bar"},
-					constraints: getDefaultTopologyConstraints(1, func(constraint *v1.TopologySpreadConstraint) {
-						constraint.NodeAffinityPolicy = utilptr.To(v1.NodeInclusionPolicyIgnore)
-					}),
-					nodeSelector: map[string]string{
-						"zone":             "zoneA",
-						v1.LabelArchStable: "arm64",
-					},
-				},
-				{
-					count:  1,
-					node:   "B1",
-					labels: map[string]string{"foo": "bar"},
-					constraints: getDefaultTopologyConstraints(1, func(constraint *v1.TopologySpreadConstraint) {
-						constraint.NodeAffinityPolicy = utilptr.To(v1.NodeInclusionPolicyIgnore)
-					}),
-					nodeSelector: map[string]string{
-						v1.LabelArchStable: "arm64",
-					},
-				},
-			}),
-			expectedEvictedCount: 1,
-			expectedEvictedPods:  []string{"pod-0"},
-			namespaces:           []string{"ns1"},
-			args:                 RemovePodsViolatingTopologySpreadConstraintArgs{},
-		},
 	}
 
 	for _, tc := range testCases {
@@ -1471,29 +1419,85 @@ func TestTopologySpreadConstraint(t *testing.T) {
 			objs = append(objs, &v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns1"}})
 			fakeClient := fake.NewSimpleClientset(objs...)
 
-			handle, podEvictor, err := frameworktesting.InitFrameworkHandle(
-				ctx,
+			sharedInformerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
+			podInformer := sharedInformerFactory.Core().V1().Pods().Informer()
+
+			podsAssignedToNode, err := podutil.BuildGetPodsAssignedToNodeFunc(podInformer)
+			if err != nil {
+				t.Errorf("Build get pods assigned to node function error: %v", err)
+			}
+
+			// workaround to ensure that pods are returned sorted so 'expectedEvictedPods' would work consistently
+			getPodsAssignedToNode := func(s string, filterFunc podutil.FilterFunc) ([]*v1.Pod, error) {
+				pods, err := podsAssignedToNode(s, filterFunc)
+				sort.Slice(pods, func(i, j int) bool {
+					return pods[i].Name < pods[j].Name
+				})
+
+				return pods, err
+			}
+
+			sharedInformerFactory.Start(ctx.Done())
+			sharedInformerFactory.WaitForCacheSync(ctx.Done())
+
+			var evictedPods []string
+			fakeClient.PrependReactor("create", "pods", func(action core.Action) (bool, runtime.Object, error) {
+				if action.GetSubresource() == "eviction" {
+					createAct, matched := action.(core.CreateActionImpl)
+					if !matched {
+						return false, nil, fmt.Errorf("unable to convert action to core.CreateActionImpl")
+					}
+					if eviction, matched := createAct.Object.(*policy.Eviction); matched {
+						evictedPods = append(evictedPods, eviction.GetName())
+					}
+				}
+				return false, nil, nil // fallback to the default reactor
+			})
+
+			eventRecorder := &events.FakeRecorder{}
+
+			podEvictor := evictions.NewPodEvictor(
 				fakeClient,
+				"v1",
+				false,
 				nil,
-				defaultevictor.DefaultEvictorArgs{NodeFit: tc.nodeFit},
-				// workaround to ensure that pods are returned sorted so 'expectedEvictedPods' would work consistently
-				func(pods []*v1.Pod) {
-					sort.Slice(pods, func(i, j int) bool {
-						return pods[i].Name < pods[j].Name
-					})
+				nil,
+				tc.nodes,
+				false,
+				eventRecorder,
+			)
+
+			defaultevictorArgs := &defaultevictor.DefaultEvictorArgs{
+				EvictLocalStoragePods:   false,
+				EvictSystemCriticalPods: false,
+				IgnorePvcPods:           false,
+				EvictFailedBarePods:     false,
+				NodeFit:                 tc.nodeFit,
+			}
+
+			evictorFilter, err := defaultevictor.New(
+				defaultevictorArgs,
+				&frameworkfake.HandleImpl{
+					ClientsetImpl:                 fakeClient,
+					GetPodsAssignedToNodeFuncImpl: getPodsAssignedToNode,
+					SharedInformerFactoryImpl:     sharedInformerFactory,
 				},
 			)
 			if err != nil {
-				t.Fatalf("Unable to initialize a framework handle: %v", err)
+				t.Fatalf("Unable to initialize the plugin: %v", err)
 			}
 
-			var evictedPods []string
-			test.RegisterEvictedPodsCollector(fakeClient, &evictedPods)
+			handle := &frameworkfake.HandleImpl{
+				ClientsetImpl:                 fakeClient,
+				GetPodsAssignedToNodeFuncImpl: getPodsAssignedToNode,
+				PodEvictorImpl:                podEvictor,
+				EvictorFilterImpl:             evictorFilter.(frameworktypes.EvictorPlugin),
+				SharedInformerFactoryImpl:     sharedInformerFactory,
+			}
 
 			SetDefaults_RemovePodsViolatingTopologySpreadConstraintArgs(&tc.args)
 
 			plugin, err := New(
-				ctx,
 				&tc.args,
 				handle,
 			)
@@ -1517,231 +1521,6 @@ func TestTopologySpreadConstraint(t *testing.T) {
 						evictedPods,
 					)
 				}
-			}
-		})
-	}
-}
-
-func TestSortDomains(t *testing.T) {
-	tests := []struct {
-		name               string
-		constraintTopology map[topologyPair][]*v1.Pod
-		want               []topology
-	}{
-		{
-			name:               "empty input",
-			constraintTopology: map[topologyPair][]*v1.Pod{},
-			want:               []topology{},
-		},
-		{
-			name: "single domain with mixed pods",
-			constraintTopology: map[topologyPair][]*v1.Pod{
-				{"zone", "a"}: {
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "non-evictable-pod",
-							Annotations: map[string]string{"evictable": "false"},
-						},
-					},
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "evictable-with-affinity",
-							Annotations: map[string]string{"evictable": "true", "hasSelectorOrAffinity": "true"},
-						},
-						Spec: v1.PodSpec{
-							Priority: utilptr.To[int32](10),
-						},
-					},
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "evictable-high-priority",
-							Annotations: map[string]string{"evictable": "true"},
-						},
-						Spec: v1.PodSpec{
-							Priority: utilptr.To[int32](15),
-						},
-					},
-				},
-			},
-			want: []topology{
-				{pair: topologyPair{"zone", "a"}, pods: []*v1.Pod{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "non-evictable-pod",
-							Annotations: map[string]string{"evictable": "false"},
-						},
-					},
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "evictable-with-affinity",
-							Annotations: map[string]string{"evictable": "true", "hasSelectorOrAffinity": "true"},
-						},
-						Spec: v1.PodSpec{
-							Priority: utilptr.To[int32](10),
-						},
-					},
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "evictable-high-priority",
-							Annotations: map[string]string{"evictable": "true"},
-						},
-						Spec: v1.PodSpec{
-							Priority: utilptr.To[int32](15),
-						},
-					},
-				}},
-			},
-		},
-		{
-			name: "multiple domains with different priorities and selectors",
-			constraintTopology: map[topologyPair][]*v1.Pod{
-				{"zone", "a"}: {
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "high-priority-affinity",
-							Annotations: map[string]string{"evictable": "true"},
-						},
-						Spec: v1.PodSpec{
-							Priority: utilptr.To[int32](20),
-						},
-					},
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "low-priority-no-affinity",
-							Annotations: map[string]string{"evictable": "true"},
-						},
-						Spec: v1.PodSpec{
-							Priority: utilptr.To[int32](5),
-						},
-					},
-				},
-				{"zone", "b"}: {
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "medium-priority-affinity",
-							Annotations: map[string]string{"evictable": "true"},
-						},
-						Spec: v1.PodSpec{
-							Priority: utilptr.To[int32](15),
-						},
-					},
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "non-evictable-pod",
-							Annotations: map[string]string{"evictable": "false"},
-						},
-					},
-				},
-			},
-			want: []topology{
-				{pair: topologyPair{"zone", "a"}, pods: []*v1.Pod{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "low-priority-no-affinity",
-							Annotations: map[string]string{"evictable": "true"},
-						},
-						Spec: v1.PodSpec{
-							Priority: utilptr.To[int32](5),
-						},
-					},
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "high-priority-affinity",
-							Annotations: map[string]string{"evictable": "true"},
-						},
-						Spec: v1.PodSpec{
-							Priority: utilptr.To[int32](20),
-						},
-					},
-				}},
-				{pair: topologyPair{"zone", "b"}, pods: []*v1.Pod{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "non-evictable-pod",
-							Annotations: map[string]string{"evictable": "false"},
-						},
-					},
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "medium-priority-affinity",
-							Annotations: map[string]string{"evictable": "true"},
-						},
-						Spec: v1.PodSpec{
-							Priority: utilptr.To[int32](15),
-						},
-					},
-				}},
-			},
-		},
-		{
-			name: "domain with pods having different selector/affinity",
-			constraintTopology: map[topologyPair][]*v1.Pod{
-				{"zone", "a"}: {
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "pod-with-affinity",
-							Annotations: map[string]string{"evictable": "true"},
-						},
-						Spec: v1.PodSpec{
-							Affinity: &v1.Affinity{
-								NodeAffinity: &v1.NodeAffinity{},
-							},
-							Priority: utilptr.To[int32](10),
-						},
-					},
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "pod-no-affinity",
-							Annotations: map[string]string{"evictable": "true"},
-						},
-						Spec: v1.PodSpec{
-							Priority: utilptr.To[int32](15),
-						},
-					},
-				},
-			},
-			want: []topology{
-				{pair: topologyPair{"zone", "a"}, pods: []*v1.Pod{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "pod-with-affinity",
-							Annotations: map[string]string{"evictable": "true"},
-						},
-						Spec: v1.PodSpec{
-							Affinity: &v1.Affinity{
-								NodeAffinity: &v1.NodeAffinity{},
-							},
-							Priority: utilptr.To[int32](10),
-						},
-					},
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        "pod-no-affinity",
-							Annotations: map[string]string{"evictable": "true"},
-						},
-						Spec: v1.PodSpec{
-							Priority: utilptr.To[int32](15),
-						},
-					},
-				}},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mockIsEvictable := func(pod *v1.Pod) bool {
-				if val, exists := pod.Annotations["evictable"]; exists {
-					return val == "true"
-				}
-				return false
-			}
-			got := sortDomains(tt.constraintTopology, mockIsEvictable)
-			sort.Slice(got, func(i, j int) bool {
-				return got[i].pair.value < got[j].pair.value
-			})
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("sortDomains() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -1791,51 +1570,58 @@ func getLabelSelector(key string, values []string, operator metav1.LabelSelector
 	}
 }
 
+func getDefaultTopologyConstraints(maxSkew int32) []v1.TopologySpreadConstraint {
+	return []v1.TopologySpreadConstraint{
+		{
+			MaxSkew:           maxSkew,
+			TopologyKey:       "zone",
+			WhenUnsatisfiable: v1.DoNotSchedule,
+			LabelSelector:     &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}},
+		},
+	}
+}
+
 func getDefaultNodeTopologyConstraints(maxSkew int32) []v1.TopologySpreadConstraint {
-	return getDefaultTopologyConstraints(maxSkew, func(constraint *v1.TopologySpreadConstraint) {
-		constraint.TopologyKey = "node"
-	})
+	return []v1.TopologySpreadConstraint{
+		{
+			MaxSkew:           maxSkew,
+			TopologyKey:       "node",
+			WhenUnsatisfiable: v1.DoNotSchedule,
+			LabelSelector:     &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}},
+		},
+	}
 }
 
 func getDefaultTopologyConstraintsWithPodTemplateHashMatch(maxSkew int32) []v1.TopologySpreadConstraint {
-	return getDefaultTopologyConstraints(maxSkew, func(constraint *v1.TopologySpreadConstraint) {
-		constraint.MatchLabelKeys = []string{appsv1.DefaultDeploymentUniqueLabelKey}
-	})
-}
-
-func getDefaultTopologyConstraints(maxSkew int32, edits ...func(*v1.TopologySpreadConstraint)) []v1.TopologySpreadConstraint {
-	constraint := v1.TopologySpreadConstraint{
-		MaxSkew:           maxSkew,
-		TopologyKey:       "zone",
-		WhenUnsatisfiable: v1.DoNotSchedule,
-		LabelSelector:     &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}},
+	return []v1.TopologySpreadConstraint{
+		{
+			MaxSkew:           maxSkew,
+			TopologyKey:       "zone",
+			WhenUnsatisfiable: v1.DoNotSchedule,
+			LabelSelector:     &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}},
+			MatchLabelKeys:    []string{appsv1.DefaultDeploymentUniqueLabelKey},
+		},
 	}
-
-	for _, edit := range edits {
-		edit(&constraint)
-	}
-
-	return []v1.TopologySpreadConstraint{constraint}
 }
 
 func TestCheckIdenticalConstraints(t *testing.T) {
 	selector, _ := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}})
 
 	newConstraintSame := topologySpreadConstraint{
-		MaxSkew:     2,
-		TopologyKey: "zone",
-		Selector:    selector.DeepCopySelector(),
+		maxSkew:     2,
+		topologyKey: "zone",
+		selector:    selector.DeepCopySelector(),
 	}
 	newConstraintDifferent := topologySpreadConstraint{
-		MaxSkew:     3,
-		TopologyKey: "node",
-		Selector:    selector.DeepCopySelector(),
+		maxSkew:     3,
+		topologyKey: "node",
+		selector:    selector.DeepCopySelector(),
 	}
 	namespaceTopologySpreadConstraint := []topologySpreadConstraint{
 		{
-			MaxSkew:     2,
-			TopologyKey: "zone",
-			Selector:    selector.DeepCopySelector(),
+			maxSkew:     2,
+			topologyKey: "zone",
+			selector:    selector.DeepCopySelector(),
 		},
 	}
 	testCases := []struct {

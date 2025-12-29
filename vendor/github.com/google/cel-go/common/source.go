@@ -15,6 +15,9 @@
 package common
 
 import (
+	"strings"
+	"unicode/utf8"
+
 	"github.com/google/cel-go/common/runes"
 
 	exprpb "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
@@ -61,6 +64,7 @@ type sourceImpl struct {
 	runes.Buffer
 	description string
 	lineOffsets []int32
+	idOffsets   map[int64]int32
 }
 
 var _ runes.Buffer = &sourceImpl{}
@@ -77,11 +81,18 @@ func NewTextSource(text string) Source {
 // NewStringSource creates a new Source from the given contents and description.
 func NewStringSource(contents string, description string) Source {
 	// Compute line offsets up front as they are referred to frequently.
-	buf, offs := runes.NewBufferAndLineOffsets(contents)
+	lines := strings.Split(contents, "\n")
+	offsets := make([]int32, len(lines))
+	var offset int32
+	for i, line := range lines {
+		offset = offset + int32(utf8.RuneCountInString(line)) + 1
+		offsets[int32(i)] = offset
+	}
 	return &sourceImpl{
-		Buffer:      buf,
+		Buffer:      runes.NewBuffer(contents),
 		description: description,
-		lineOffsets: offs,
+		lineOffsets: offsets,
+		idOffsets:   map[int64]int32{},
 	}
 }
 
@@ -91,6 +102,7 @@ func NewInfoSource(info *exprpb.SourceInfo) Source {
 		Buffer:      runes.NewBuffer(""),
 		description: info.GetLocation(),
 		lineOffsets: info.GetLineOffsets(),
+		idOffsets:   info.GetPositions(),
 	}
 }
 
@@ -163,8 +175,9 @@ func (s *sourceImpl) findLine(characterOffset int32) (int32, int32) {
 	for _, lineOffset := range s.lineOffsets {
 		if lineOffset > characterOffset {
 			break
+		} else {
+			line++
 		}
-		line++
 	}
 	if line == 1 {
 		return line, 0

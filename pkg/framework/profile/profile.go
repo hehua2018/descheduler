@@ -18,31 +18,28 @@ import (
 	"fmt"
 	"time"
 
-	promapi "github.com/prometheus/client_golang/api"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"sigs.k8s.io/descheduler/metrics"
+	"sigs.k8s.io/descheduler/pkg/api"
+	"sigs.k8s.io/descheduler/pkg/descheduler/evictions"
+	podutil "sigs.k8s.io/descheduler/pkg/descheduler/pod"
+	"sigs.k8s.io/descheduler/pkg/framework/pluginregistry"
+	frameworktypes "sigs.k8s.io/descheduler/pkg/framework/types"
+	"sigs.k8s.io/descheduler/pkg/tracing"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/klog/v2"
 
-	"sigs.k8s.io/descheduler/metrics"
-	"sigs.k8s.io/descheduler/pkg/api"
-	"sigs.k8s.io/descheduler/pkg/descheduler/evictions"
-	"sigs.k8s.io/descheduler/pkg/descheduler/metricscollector"
-	podutil "sigs.k8s.io/descheduler/pkg/descheduler/pod"
-	"sigs.k8s.io/descheduler/pkg/framework/pluginregistry"
-	frameworktypes "sigs.k8s.io/descheduler/pkg/framework/types"
-	"sigs.k8s.io/descheduler/pkg/tracing"
+	"k8s.io/klog/v2"
 )
 
 // evictorImpl implements the Evictor interface so plugins
 // can evict a pod without importing a specific pod evictor
 type evictorImpl struct {
-	profileName       string
 	podEvictor        *evictions.PodEvictor
 	filter            podutil.FilterFunc
 	preEvictionFilter podutil.FilterFunc
@@ -61,16 +58,17 @@ func (ei *evictorImpl) PreEvictionFilter(pod *v1.Pod) bool {
 }
 
 // Evict evicts a pod (no pre-check performed)
-func (ei *evictorImpl) Evict(ctx context.Context, pod *v1.Pod, opts evictions.EvictOptions) error {
-	opts.ProfileName = ei.profileName
+func (ei *evictorImpl) Evict(ctx context.Context, pod *v1.Pod, opts evictions.EvictOptions) bool {
 	return ei.podEvictor.EvictPod(ctx, pod, opts)
+}
+
+func (ei *evictorImpl) NodeLimitExceeded(node *v1.Node) bool {
+	return ei.podEvictor.NodeLimitExceeded(node)
 }
 
 // handleImpl implements the framework handle which gets passed to plugins
 type handleImpl struct {
 	clientSet                 clientset.Interface
-	prometheusClient          promapi.Client
-	metricsCollector          *metricscollector.MetricsCollector
 	getPodsAssignedToNodeFunc podutil.GetPodsAssignedToNodeFunc
 	sharedInformerFactory     informers.SharedInformerFactory
 	evictor                   *evictorImpl
@@ -81,14 +79,6 @@ var _ frameworktypes.Handle = &handleImpl{}
 // ClientSet retrieves kube client set
 func (hi *handleImpl) ClientSet() clientset.Interface {
 	return hi.clientSet
-}
-
-func (hi *handleImpl) PrometheusClient() promapi.Client {
-	return hi.prometheusClient
-}
-
-func (hi *handleImpl) MetricsCollector() *metricscollector.MetricsCollector {
-	return hi.metricsCollector
 }
 
 // GetPodsAssignedToNodeFunc retrieves GetPodsAssignedToNodeFunc implementation
@@ -137,24 +127,15 @@ type Option func(*handleImplOpts)
 
 type handleImplOpts struct {
 	clientSet                 clientset.Interface
-	prometheusClient          promapi.Client
 	sharedInformerFactory     informers.SharedInformerFactory
 	getPodsAssignedToNodeFunc podutil.GetPodsAssignedToNodeFunc
 	podEvictor                *evictions.PodEvictor
-	metricsCollector          *metricscollector.MetricsCollector
 }
 
 // WithClientSet sets clientSet for the scheduling frameworkImpl.
 func WithClientSet(clientSet clientset.Interface) Option {
 	return func(o *handleImplOpts) {
 		o.clientSet = clientSet
-	}
-}
-
-// WithPrometheusClient sets Prometheus client for the scheduling frameworkImpl.
-func WithPrometheusClient(prometheusClient promapi.Client) Option {
-	return func(o *handleImplOpts) {
-		o.prometheusClient = prometheusClient
 	}
 }
 
@@ -176,12 +157,6 @@ func WithGetPodsAssignedToNodeFnc(getPodsAssignedToNodeFunc podutil.GetPodsAssig
 	}
 }
 
-func WithMetricsCollector(metricsCollector *metricscollector.MetricsCollector) Option {
-	return func(o *handleImplOpts) {
-		o.metricsCollector = metricsCollector
-	}
-}
-
 func getPluginConfig(pluginName string, pluginConfigs []api.PluginConfig) (*api.PluginConfig, int) {
 	for idx, pluginConfig := range pluginConfigs {
 		if pluginConfig.Name == pluginName {
@@ -191,7 +166,7 @@ func getPluginConfig(pluginName string, pluginConfigs []api.PluginConfig) (*api.
 	return nil, 0
 }
 
-func buildPlugin(ctx context.Context, config api.DeschedulerProfile, pluginName string, handle *handleImpl, reg pluginregistry.Registry) (frameworktypes.Plugin, error) {
+func buildPlugin(config api.DeschedulerProfile, pluginName string, handle *handleImpl, reg pluginregistry.Registry) (frameworktypes.Plugin, error) {
 	pc, _ := getPluginConfig(pluginName, config.PluginConfigs)
 	if pc == nil {
 		klog.ErrorS(fmt.Errorf("unable to get plugin config"), "skipping plugin", "plugin", pluginName, "profile", config.Name)
@@ -203,7 +178,7 @@ func buildPlugin(ctx context.Context, config api.DeschedulerProfile, pluginName 
 		klog.ErrorS(fmt.Errorf("unable to find plugin in the pluginsMap"), "skipping plugin", "plugin", pluginName)
 		return nil, fmt.Errorf("unable to find %q plugin in the pluginsMap", pluginName)
 	}
-	pg, err := registryPlugin.PluginBuilder(ctx, pc.Args, handle)
+	pg, err := registryPlugin.PluginBuilder(pc.Args, handle)
 	if err != nil {
 		klog.ErrorS(err, "unable to initialize a plugin", "pluginName", pluginName)
 		return nil, fmt.Errorf("unable to initialize %q plugin: %v", pluginName, err)
@@ -231,7 +206,7 @@ func (p *profileImpl) registryToExtensionPoints(registry pluginregistry.Registry
 	}
 }
 
-func NewProfile(ctx context.Context, config api.DeschedulerProfile, reg pluginregistry.Registry, opts ...Option) (*profileImpl, error) {
+func NewProfile(config api.DeschedulerProfile, reg pluginregistry.Registry, opts ...Option) (*profileImpl, error) {
 	hOpts := &handleImplOpts{}
 	for _, optFnc := range opts {
 		optFnc(hOpts)
@@ -277,11 +252,8 @@ func NewProfile(ctx context.Context, config api.DeschedulerProfile, reg pluginre
 		getPodsAssignedToNodeFunc: hOpts.getPodsAssignedToNodeFunc,
 		sharedInformerFactory:     hOpts.sharedInformerFactory,
 		evictor: &evictorImpl{
-			profileName: config.Name,
-			podEvictor:  hOpts.podEvictor,
+			podEvictor: hOpts.podEvictor,
 		},
-		metricsCollector: hOpts.metricsCollector,
-		prometheusClient: hOpts.prometheusClient,
 	}
 
 	pluginNames := append(config.Plugins.Deschedule.Enabled, config.Plugins.Balance.Enabled...)
@@ -290,7 +262,7 @@ func NewProfile(ctx context.Context, config api.DeschedulerProfile, reg pluginre
 
 	plugins := make(map[string]frameworktypes.Plugin)
 	for _, plugin := range sets.New(pluginNames...).UnsortedList() {
-		pg, err := buildPlugin(ctx, config, plugin, handle, reg)
+		pg, err := buildPlugin(config, plugin, handle, reg)
 		if err != nil {
 			return nil, fmt.Errorf("unable to build %v plugin: %v", plugin, err)
 		}
@@ -334,18 +306,21 @@ func (d profileImpl) RunDeschedulePlugins(ctx context.Context, nodes []*v1.Node)
 		var span trace.Span
 		ctx, span = tracing.Tracer().Start(ctx, pl.Name(), trace.WithAttributes(attribute.String("plugin", pl.Name()), attribute.String("profile", d.profileName), attribute.String("operation", tracing.DescheduleOperation)))
 		defer span.End()
-		evictedBeforeDeschedule := d.podEvictor.TotalEvicted()
-		evictionRequestsBeforeDeschedule := d.podEvictor.TotalEvictionRequests()
+		evicted := d.podEvictor.TotalEvicted()
+		// TODO: strategyName should be accessible from within the strategy using a framework
+		// handle or function which the Evictor has access to. For migration/in-progress framework
+		// work, we are currently passing this via context. To be removed
+		// (See discussion thread https://github.com/kubernetes-sigs/descheduler/pull/885#discussion_r919962292)
 		strategyStart := time.Now()
-		status := pl.Deschedule(ctx, nodes)
+		childCtx := context.WithValue(ctx, "strategyName", pl.Name())
+		status := pl.Deschedule(childCtx, nodes)
 		metrics.DeschedulerStrategyDuration.With(map[string]string{"strategy": pl.Name(), "profile": d.profileName}).Observe(time.Since(strategyStart).Seconds())
-		metrics.StrategyDuration.With(map[string]string{"strategy": pl.Name(), "profile": d.profileName}).Observe(time.Since(strategyStart).Seconds())
 
 		if status != nil && status.Err != nil {
 			span.AddEvent("Plugin Execution Failed", trace.WithAttributes(attribute.String("err", status.Err.Error())))
 			errs = append(errs, fmt.Errorf("plugin %q finished with error: %v", pl.Name(), status.Err))
 		}
-		klog.V(1).InfoS("Total number of evictions/requests", "extension point", "Deschedule", "evictedPods", d.podEvictor.TotalEvicted()-evictedBeforeDeschedule, "evictionRequests", d.podEvictor.TotalEvictionRequests()-evictionRequestsBeforeDeschedule)
+		klog.V(1).InfoS("Total number of pods evicted", "extension point", "Deschedule", "evictedPods", d.podEvictor.TotalEvicted()-evicted)
 	}
 
 	aggrErr := errors.NewAggregate(errs)
@@ -364,18 +339,21 @@ func (d profileImpl) RunBalancePlugins(ctx context.Context, nodes []*v1.Node) *f
 		var span trace.Span
 		ctx, span = tracing.Tracer().Start(ctx, pl.Name(), trace.WithAttributes(attribute.String("plugin", pl.Name()), attribute.String("profile", d.profileName), attribute.String("operation", tracing.BalanceOperation)))
 		defer span.End()
-		evictedBeforeBalance := d.podEvictor.TotalEvicted()
-		evictionRequestsBeforeBalance := d.podEvictor.TotalEvictionRequests()
+		evicted := d.podEvictor.TotalEvicted()
+		// TODO: strategyName should be accessible from within the strategy using a framework
+		// handle or function which the Evictor has access to. For migration/in-progress framework
+		// work, we are currently passing this via context. To be removed
+		// (See discussion thread https://github.com/kubernetes-sigs/descheduler/pull/885#discussion_r919962292)
 		strategyStart := time.Now()
-		status := pl.Balance(ctx, nodes)
+		childCtx := context.WithValue(ctx, "strategyName", pl.Name())
+		status := pl.Balance(childCtx, nodes)
 		metrics.DeschedulerStrategyDuration.With(map[string]string{"strategy": pl.Name(), "profile": d.profileName}).Observe(time.Since(strategyStart).Seconds())
-		metrics.StrategyDuration.With(map[string]string{"strategy": pl.Name(), "profile": d.profileName}).Observe(time.Since(strategyStart).Seconds())
 
 		if status != nil && status.Err != nil {
 			span.AddEvent("Plugin Execution Failed", trace.WithAttributes(attribute.String("err", status.Err.Error())))
 			errs = append(errs, fmt.Errorf("plugin %q finished with error: %v", pl.Name(), status.Err))
 		}
-		klog.V(1).InfoS("Total number of evictions/requests", "extension point", "Balance", "evictedPods", d.podEvictor.TotalEvicted()-evictedBeforeBalance, "evictionRequests", d.podEvictor.TotalEvictionRequests()-evictionRequestsBeforeBalance)
+		klog.V(1).InfoS("Total number of pods evicted", "extension point", "Balance", "evictedPods", d.podEvictor.TotalEvicted()-evicted)
 	}
 
 	aggrErr := errors.NewAggregate(errs)

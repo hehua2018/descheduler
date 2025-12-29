@@ -18,23 +18,21 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 )
 
 // ValidateRemoveFailedPodsArgs validates RemoveFailedPods arguments
 func ValidateRemoveFailedPodsArgs(obj runtime.Object) error {
 	args := obj.(*RemoveFailedPodsArgs)
-	var allErrs []error
 	// At most one of include/exclude can be set
 	if args.Namespaces != nil && len(args.Namespaces.Include) > 0 && len(args.Namespaces.Exclude) > 0 {
-		allErrs = append(allErrs, fmt.Errorf("only one of Include/Exclude namespaces can be set"))
+		return fmt.Errorf("only one of Include/Exclude namespaces can be set")
 	}
 
 	if args.LabelSelector != nil {
 		if _, err := metav1.LabelSelectorAsSelector(args.LabelSelector); err != nil {
-			allErrs = append(allErrs, fmt.Errorf("failed to get label selectors from strategy's params: %+v", err))
+			return fmt.Errorf("failed to get label selectors from strategy's params: %+v", err)
 		}
 	}
 
-	return utilerrors.NewAggregate(allErrs)
+	return nil
 }

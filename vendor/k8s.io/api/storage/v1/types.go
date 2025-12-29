@@ -25,7 +25,6 @@ import (
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +k8s:prerelease-lifecycle-gen:introduced=1.6
 
 // StorageClass describes the parameters for a class of storage for
 // which PersistentVolumes can be dynamically provisioned.
@@ -57,7 +56,6 @@ type StorageClass struct {
 	// e.g. ["ro", "soft"]. Not validated -
 	// mount of the PVs will simply fail if one is invalid.
 	// +optional
-	// +listType=atomic
 	MountOptions []string `json:"mountOptions,omitempty" protobuf:"bytes,5,opt,name=mountOptions"`
 
 	// allowVolumeExpansion shows whether the storage class allow volume expand.
@@ -80,7 +78,6 @@ type StorageClass struct {
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +k8s:prerelease-lifecycle-gen:introduced=1.6
 
 // StorageClassList is a collection of storage classes.
 type StorageClassList struct {
@@ -114,7 +111,6 @@ const (
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +k8s:prerelease-lifecycle-gen:introduced=1.13
 
 // VolumeAttachment captures the intent to attach or detach the specified volume
 // to/from the specified node.
@@ -140,7 +136,6 @@ type VolumeAttachment struct {
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +k8s:prerelease-lifecycle-gen:introduced=1.13
 
 // VolumeAttachmentList is a collection of VolumeAttachment objects.
 type VolumeAttachmentList struct {
@@ -169,8 +164,8 @@ type VolumeAttachmentSpec struct {
 }
 
 // VolumeAttachmentSource represents a volume that should be attached.
-// Right now only PersistentVolumes can be attached via external attacher,
-// in the future we may allow also inline volumes in pods.
+// Right now only PersistenVolumes can be attached via external attacher,
+// in future we may allow also inline volumes in pods.
 // Exactly one member can be set.
 type VolumeAttachmentSource struct {
 	// persistentVolumeName represents the name of the persistent volume to attach.
@@ -226,20 +221,11 @@ type VolumeError struct {
 	// information.
 	// +optional
 	Message string `json:"message,omitempty" protobuf:"bytes,2,opt,name=message"`
-
-	// errorCode is a numeric gRPC code representing the error encountered during Attach or Detach operations.
-	//
-	// This is an optional, beta field that requires the MutableCSINodeAllocatableCount feature gate being enabled to be set.
-	//
-	// +featureGate=MutableCSINodeAllocatableCount
-	// +optional
-	ErrorCode *int32 `json:"errorCode,omitempty" protobuf:"varint,3,opt,name=errorCode"`
 }
 
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +k8s:prerelease-lifecycle-gen:introduced=1.18
 
 // CSIDriver captures information about a Container Storage Interface (CSI)
 // volume driver deployed on the cluster.
@@ -264,7 +250,6 @@ type CSIDriver struct {
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +k8s:prerelease-lifecycle-gen:introduced=1.18
 
 // CSIDriverList is a collection of CSIDriver objects.
 type CSIDriverList struct {
@@ -288,7 +273,8 @@ type CSIDriverSpec struct {
 	// and waits until the volume is attached before proceeding to mounting.
 	// The CSI external-attacher coordinates with CSI volume driver and updates
 	// the volumeattachment status when the attach operation is complete.
-	// If the value is specified to false, the attach operation will be skipped.
+	// If the CSIDriverRegistry feature gate is enabled and the value is
+	// specified to false, the attach operation will be skipped.
 	// Otherwise the attach operation will be called.
 	//
 	// This field is immutable.
@@ -305,7 +291,7 @@ type CSIDriverSpec struct {
 	// If true, Kubelet will pass pod information as VolumeContext in the CSI NodePublishVolume() calls.
 	// The CSI driver is responsible for parsing and validating the information passed in as VolumeContext.
 	//
-	// The following VolumeContext will be passed if podInfoOnMount is set to true.
+	// The following VolumeConext will be passed if podInfoOnMount is set to true.
 	// This list might grow, but the prefix will be used.
 	// "csi.storage.k8s.io/pod.name": pod.Name
 	// "csi.storage.k8s.io/pod.namespace": pod.Namespace
@@ -320,7 +306,7 @@ type CSIDriverSpec struct {
 	// deployed on such a cluster and the deployment determines which mode that is, for example
 	// via a command line parameter of the driver.
 	//
-	// This field was immutable in Kubernetes < 1.29 and now is mutable.
+	// This field is immutable.
 	//
 	// +optional
 	PodInfoOnMount *bool `json:"podInfoOnMount,omitempty" protobuf:"bytes,2,opt,name=podInfoOnMount"`
@@ -367,7 +353,7 @@ type CSIDriverSpec struct {
 	// permission of the volume before being mounted.
 	// Refer to the specific FSGroupPolicy values for additional details.
 	//
-	// This field was immutable in Kubernetes < 1.29 and now is mutable.
+	// This field is immutable.
 	//
 	// Defaults to ReadWriteOnceWithFSType, which will examine each volume
 	// to determine if Kubernetes should modify ownership and permissions of the volume.
@@ -429,20 +415,6 @@ type CSIDriverSpec struct {
 	// +featureGate=SELinuxMountReadWriteOncePod
 	// +optional
 	SELinuxMount *bool `json:"seLinuxMount,omitempty" protobuf:"varint,8,opt,name=seLinuxMount"`
-
-	// nodeAllocatableUpdatePeriodSeconds specifies the interval between periodic updates of
-	// the CSINode allocatable capacity for this driver. When set, both periodic updates and
-	// updates triggered by capacity-related failures are enabled. If not set, no updates
-	// occur (neither periodic nor upon detecting capacity-related failures), and the
-	// allocatable.count remains static. The minimum allowed value for this field is 10 seconds.
-	//
-	// This is a beta feature and requires the MutableCSINodeAllocatableCount feature gate to be enabled.
-	//
-	// This field is mutable.
-	//
-	// +featureGate=MutableCSINodeAllocatableCount
-	// +optional
-	NodeAllocatableUpdatePeriodSeconds *int64 `json:"nodeAllocatableUpdatePeriodSeconds,omitempty" protobuf:"varint,9,opt,name=nodeAllocatableUpdatePeriodSeconds"`
 }
 
 // FSGroupPolicy specifies if a CSI Driver supports modifying
@@ -454,7 +426,7 @@ const (
 	// ReadWriteOnceWithFSTypeFSGroupPolicy indicates that each volume will be examined
 	// to determine if the volume ownership and permissions
 	// should be modified. If a fstype is defined and the volume's access mode
-	// contains ReadWriteOnce or ReadWriteOncePod, then the defined fsGroup will be applied.
+	// contains ReadWriteOnce, then the defined fsGroup will be applied.
 	// This mode should be defined if it's expected that the
 	// fsGroup may need to be modified depending on the pod's SecurityPolicy.
 	// This is the default behavior if no other FSGroupPolicy is defined.
@@ -518,7 +490,6 @@ const (
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +k8s:prerelease-lifecycle-gen:introduced=1.17
 
 // CSINode holds information about all CSI drivers installed on a node.
 // CSI drivers do not need to create the CSINode object directly. As long as
@@ -546,8 +517,6 @@ type CSINodeSpec struct {
 	// If all drivers in the list are uninstalled, this can become empty.
 	// +patchMergeKey=name
 	// +patchStrategy=merge
-	// +listType=map
-	// +listMapKey=name
 	Drivers []CSINodeDriver `json:"drivers" patchStrategy:"merge" patchMergeKey:"name" protobuf:"bytes,1,rep,name=drivers"`
 }
 
@@ -580,7 +549,6 @@ type CSINodeDriver struct {
 	// It is possible for different nodes to use different topology keys.
 	// This can be empty if driver does not support topology.
 	// +optional
-	// +listType=atomic
 	TopologyKeys []string `json:"topologyKeys" protobuf:"bytes,3,rep,name=topologyKeys"`
 
 	// allocatable represents the volume resources of a node that are available for scheduling.
@@ -600,7 +568,6 @@ type VolumeNodeResources struct {
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +k8s:prerelease-lifecycle-gen:introduced=1.17
 
 // CSINodeList is a collection of CSINode objects.
 type CSINodeList struct {
@@ -617,7 +584,6 @@ type CSINodeList struct {
 
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +k8s:prerelease-lifecycle-gen:introduced=1.24
 
 // CSIStorageCapacity stores the result of one CSI GetCapacity call.
 // For a given StorageClass, this describes the available capacity in a
@@ -703,7 +669,6 @@ type CSIStorageCapacity struct {
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +k8s:prerelease-lifecycle-gen:introduced=1.24
 
 // CSIStorageCapacityList is a collection of CSIStorageCapacity objects.
 type CSIStorageCapacityList struct {
@@ -715,57 +680,7 @@ type CSIStorageCapacityList struct {
 	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
 
 	// items is the list of CSIStorageCapacity objects.
+	// +listType=map
+	// +listMapKey=name
 	Items []CSIStorageCapacity `json:"items" protobuf:"bytes,2,rep,name=items"`
-}
-
-// +genclient
-// +genclient:nonNamespaced
-// +k8s:prerelease-lifecycle-gen:introduced=1.34
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
-// VolumeAttributesClass represents a specification of mutable volume attributes
-// defined by the CSI driver. The class can be specified during dynamic provisioning
-// of PersistentVolumeClaims, and changed in the PersistentVolumeClaim spec after provisioning.
-type VolumeAttributesClass struct {
-	metav1.TypeMeta `json:",inline"`
-
-	// Standard object's metadata.
-	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
-
-	// Name of the CSI driver
-	// This field is immutable.
-	DriverName string `json:"driverName" protobuf:"bytes,2,opt,name=driverName"`
-
-	// parameters hold volume attributes defined by the CSI driver. These values
-	// are opaque to the Kubernetes and are passed directly to the CSI driver.
-	// The underlying storage provider supports changing these attributes on an
-	// existing volume, however the parameters field itself is immutable. To
-	// invoke a volume update, a new VolumeAttributesClass should be created with
-	// new parameters, and the PersistentVolumeClaim should be updated to reference
-	// the new VolumeAttributesClass.
-	//
-	// This field is required and must contain at least one key/value pair.
-	// The keys cannot be empty, and the maximum number of parameters is 512, with
-	// a cumulative max size of 256K. If the CSI driver rejects invalid parameters,
-	// the target PersistentVolumeClaim will be set to an "Infeasible" state in the
-	// modifyVolumeStatus field.
-	Parameters map[string]string `json:"parameters,omitempty" protobuf:"bytes,3,rep,name=parameters"`
-}
-
-// +k8s:prerelease-lifecycle-gen:introduced=1.34
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
-// VolumeAttributesClassList is a collection of VolumeAttributesClass objects.
-type VolumeAttributesClassList struct {
-	metav1.TypeMeta `json:",inline"`
-
-	// Standard list metadata
-	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
-	// +optional
-	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
-
-	// items is the list of VolumeAttributesClass objects.
-	Items []VolumeAttributesClass `json:"items" protobuf:"bytes,2,rep,name=items"`
 }

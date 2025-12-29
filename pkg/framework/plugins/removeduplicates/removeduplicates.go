@@ -45,7 +45,6 @@ const PluginName = "RemoveDuplicates"
 // As of now, this plugin won't evict daemonsets, mirror pods, critical pods and pods with local storages.
 
 type RemoveDuplicates struct {
-	logger    klog.Logger
 	handle    frameworktypes.Handle
 	args      *RemoveDuplicatesArgs
 	podFilter podutil.FilterFunc
@@ -63,12 +62,11 @@ func (po podOwner) String() string {
 }
 
 // New builds plugin from its arguments while passing a handle
-func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle) (frameworktypes.Plugin, error) {
+func New(args runtime.Object, handle frameworktypes.Handle) (frameworktypes.Plugin, error) {
 	removeDuplicatesArgs, ok := args.(*RemoveDuplicatesArgs)
 	if !ok {
 		return nil, fmt.Errorf("want args to be of type RemoveDuplicatesArgs, got %T", args)
 	}
-	logger := klog.FromContext(ctx).WithValues("plugin", PluginName)
 
 	var includedNamespaces, excludedNamespaces sets.Set[string]
 	if removeDuplicatesArgs.Namespaces != nil {
@@ -87,7 +85,6 @@ func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle)
 	}
 
 	return &RemoveDuplicates{
-		logger:    logger,
 		handle:    handle,
 		args:      removeDuplicatesArgs,
 		podFilter: podFilter,
@@ -105,13 +102,12 @@ func (r *RemoveDuplicates) Balance(ctx context.Context, nodes []*v1.Node) *frame
 	ownerKeyOccurence := make(map[podOwner]int32)
 	nodeCount := 0
 	nodeMap := make(map[string]*v1.Node)
-	logger := klog.FromContext(klog.NewContext(ctx, r.logger)).WithValues("ExtensionPoint", frameworktypes.BalanceExtensionPoint)
 
 	for _, node := range nodes {
-		logger.V(2).Info("Processing node", "node", klog.KObj(node))
+		klog.V(2).InfoS("Processing node", "node", klog.KObj(node))
 		pods, err := podutil.ListPodsOnANode(node.Name, r.handle.GetPodsAssignedToNodeFunc(), r.podFilter)
 		if err != nil {
-			logger.Error(err, "Error listing evictable pods on node", "node", klog.KObj(node))
+			klog.ErrorS(err, "Error listing evictable pods on node", "node", klog.KObj(node))
 			continue
 		}
 		nodeMap[node.Name] = node
@@ -167,7 +163,7 @@ func (r *RemoveDuplicates) Balance(ctx context.Context, nodes []*v1.Node) *frame
 				for _, keys := range existing {
 					if reflect.DeepEqual(keys, podContainerKeys) {
 						matched = true
-						logger.V(3).Info("Duplicate found", "pod", klog.KObj(pod))
+						klog.V(3).InfoS("Duplicate found", "pod", klog.KObj(pod))
 						for _, ownerRef := range ownerRefList {
 							ownerKey := podOwner{
 								namespace:  pod.ObjectMeta.Namespace,
@@ -199,32 +195,24 @@ func (r *RemoveDuplicates) Balance(ctx context.Context, nodes []*v1.Node) *frame
 
 		targetNodes := getTargetNodes(podNodes, nodes)
 
-		logger.V(2).Info("Adjusting feasible nodes", "owner", ownerKey, "from", nodeCount, "to", len(targetNodes))
+		klog.V(2).InfoS("Adjusting feasible nodes", "owner", ownerKey, "from", nodeCount, "to", len(targetNodes))
 		if len(targetNodes) < 2 {
-			logger.V(1).Info("Less than two feasible nodes for duplicates to land, skipping eviction", "owner", ownerKey)
+			klog.V(1).InfoS("Less than two feasible nodes for duplicates to land, skipping eviction", "owner", ownerKey)
 			continue
 		}
 
 		upperAvg := int(math.Ceil(float64(ownerKeyOccurence[ownerKey]) / float64(len(targetNodes))))
 	loop:
 		for nodeName, pods := range podNodes {
-			logger.V(2).Info("Average occurrence per node", "node", klog.KObj(nodeMap[nodeName]), "ownerKey", ownerKey, "avg", upperAvg)
+			klog.V(2).InfoS("Average occurrence per node", "node", klog.KObj(nodeMap[nodeName]), "ownerKey", ownerKey, "avg", upperAvg)
 			// list of duplicated pods does not contain the original referential pod
 			if len(pods)+1 > upperAvg {
 				// It's assumed all duplicated pods are in the same priority class
 				// TODO(jchaloup): check if the pod has a different node to lend to
 				for _, pod := range pods[upperAvg-1:] {
-					err := r.handle.Evictor().Evict(ctx, pod, evictions.EvictOptions{StrategyName: PluginName})
-					if err == nil {
-						continue
-					}
-					switch err.(type) {
-					case *evictions.EvictionNodeLimitError:
+					r.handle.Evictor().Evict(ctx, pod, evictions.EvictOptions{})
+					if r.handle.Evictor().NodeLimitExceeded(nodeMap[nodeName]) {
 						continue loop
-					case *evictions.EvictionTotalLimitError:
-						return nil
-					default:
-						logger.Error(err, "eviction failed")
 					}
 				}
 			}
@@ -250,7 +238,7 @@ func getTargetNodes(podNodes map[string][]*v1.Pod, nodes []*v1.Node) []*v1.Node 
 					utils.NodeSelectorsEqual(getNodeAffinityNodeSelector(pod), getNodeAffinityNodeSelector(dp)) &&
 					reflect.DeepEqual(pod.Spec.NodeSelector, dp.Spec.NodeSelector) {
 					duplicated = true
-					break
+					continue
 				}
 			}
 			if duplicated {

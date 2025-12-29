@@ -5,12 +5,8 @@ profiles:
     pluginConfig:
     - name: "HighNodeUtilization"
       args:
-        useActualUsage: true  #use actual usage or requests
         thresholds:
-          "cpu" : 20
           "memory": 20
-          "pods": 20
-        numberOfNodes: 3
     plugins:
       balance:
         enabled:

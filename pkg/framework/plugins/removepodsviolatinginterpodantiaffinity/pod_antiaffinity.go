@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/descheduler/pkg/utils"
 
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 )
 
@@ -35,7 +36,6 @@ const PluginName = "RemovePodsViolatingInterPodAntiAffinity"
 
 // RemovePodsViolatingInterPodAntiAffinity evicts pods on the node which violate inter pod anti affinity
 type RemovePodsViolatingInterPodAntiAffinity struct {
-	logger    klog.Logger
 	handle    frameworktypes.Handle
 	args      *RemovePodsViolatingInterPodAntiAffinityArgs
 	podFilter podutil.FilterFunc
@@ -44,12 +44,11 @@ type RemovePodsViolatingInterPodAntiAffinity struct {
 var _ frameworktypes.DeschedulePlugin = &RemovePodsViolatingInterPodAntiAffinity{}
 
 // New builds plugin from its arguments while passing a handle
-func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle) (frameworktypes.Plugin, error) {
+func New(args runtime.Object, handle frameworktypes.Handle) (frameworktypes.Plugin, error) {
 	interPodAntiAffinityArgs, ok := args.(*RemovePodsViolatingInterPodAntiAffinityArgs)
 	if !ok {
 		return nil, fmt.Errorf("want args to be of type RemovePodsViolatingInterPodAntiAffinityArgs, got %T", args)
 	}
-	logger := klog.FromContext(ctx).WithValues("plugin", PluginName)
 
 	var includedNamespaces, excludedNamespaces sets.Set[string]
 	if interPodAntiAffinityArgs.Namespaces != nil {
@@ -67,7 +66,6 @@ func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle)
 	}
 
 	return &RemovePodsViolatingInterPodAntiAffinity{
-		logger:    logger,
 		handle:    handle,
 		podFilter: podFilter,
 		args:      interPodAntiAffinityArgs,
@@ -80,7 +78,6 @@ func (d *RemovePodsViolatingInterPodAntiAffinity) Name() string {
 }
 
 func (d *RemovePodsViolatingInterPodAntiAffinity) Deschedule(ctx context.Context, nodes []*v1.Node) *frameworktypes.Status {
-	logger := klog.FromContext(klog.NewContext(ctx, d.logger)).WithValues("ExtensionPoint", frameworktypes.DescheduleExtensionPoint)
 	pods, err := podutil.ListPodsOnNodes(nodes, d.handle.GetPodsAssignedToNodeFunc(), d.podFilter)
 	if err != nil {
 		return &frameworktypes.Status{
@@ -89,39 +86,30 @@ func (d *RemovePodsViolatingInterPodAntiAffinity) Deschedule(ctx context.Context
 	}
 
 	podsInANamespace := podutil.GroupByNamespace(pods)
-	podsOnANode := podutil.GroupByNodeName(pods)
-	nodeMap := utils.CreateNodeMap(nodes)
+	podsOnANode := groupByNodeName(pods)
+	nodeMap := createNodeMap(nodes)
 
 loop:
 	for _, node := range nodes {
-		logger.V(2).Info("Processing node", "node", klog.KObj(node))
+		klog.V(2).InfoS("Processing node", "node", klog.KObj(node))
 		pods := podsOnANode[node.Name]
 		// sort the evict-able Pods based on priority, if there are multiple pods with same priority, they are sorted based on QoS tiers.
 		podutil.SortPodsBasedOnPriorityLowToHigh(pods)
 		totalPods := len(pods)
 		for i := 0; i < totalPods; i++ {
-			if utils.CheckPodsWithAntiAffinityExist(pods[i], podsInANamespace, nodeMap) {
-				if d.handle.Evictor().Filter(pods[i]) && d.handle.Evictor().PreEvictionFilter(pods[i]) {
-					err := d.handle.Evictor().Evict(ctx, pods[i], evictions.EvictOptions{StrategyName: PluginName})
-					if err == nil {
-						// Since the current pod is evicted all other pods which have anti-affinity with this
-						// pod need not be evicted.
-						// Update allPods.
-						podsInANamespace = removePodFromNamespaceMap(pods[i], podsInANamespace)
-						pods = append(pods[:i], pods[i+1:]...)
-						i--
-						totalPods--
-						continue
-					}
-					switch err.(type) {
-					case *evictions.EvictionNodeLimitError:
-						continue loop
-					case *evictions.EvictionTotalLimitError:
-						return nil
-					default:
-						logger.Error(err, "eviction failed")
-					}
+			if checkPodsWithAntiAffinityExist(pods[i], podsInANamespace, nodeMap) && d.handle.Evictor().Filter(pods[i]) && d.handle.Evictor().PreEvictionFilter(pods[i]) {
+				if d.handle.Evictor().Evict(ctx, pods[i], evictions.EvictOptions{}) {
+					// Since the current pod is evicted all other pods which have anti-affinity with this
+					// pod need not be evicted.
+					// Update allPods.
+					podsInANamespace = removePodFromNamespaceMap(pods[i], podsInANamespace)
+					pods = append(pods[:i], pods[i+1:]...)
+					i--
+					totalPods--
 				}
+			}
+			if d.handle.Evictor().NodeLimitExceeded(node) {
+				continue loop
 			}
 		}
 	}
@@ -141,4 +129,88 @@ func removePodFromNamespaceMap(podToRemove *v1.Pod, podMap map[string][]*v1.Pod)
 		}
 	}
 	return podMap
+}
+
+func groupByNodeName(pods []*v1.Pod) map[string][]*v1.Pod {
+	m := make(map[string][]*v1.Pod)
+	for i := 0; i < len(pods); i++ {
+		pod := pods[i]
+		m[pod.Spec.NodeName] = append(m[pod.Spec.NodeName], pod)
+	}
+	return m
+}
+
+func createNodeMap(nodes []*v1.Node) map[string]*v1.Node {
+	m := make(map[string]*v1.Node, len(nodes))
+	for _, node := range nodes {
+		m[node.GetName()] = node
+	}
+	return m
+}
+
+// checkPodsWithAntiAffinityExist checks if there are other pods on the node that the current pod cannot tolerate.
+func checkPodsWithAntiAffinityExist(pod *v1.Pod, pods map[string][]*v1.Pod, nodeMap map[string]*v1.Node) bool {
+	affinity := pod.Spec.Affinity
+	if affinity != nil && affinity.PodAntiAffinity != nil {
+		for _, term := range getPodAntiAffinityTerms(affinity.PodAntiAffinity) {
+			namespaces := utils.GetNamespacesFromPodAffinityTerm(pod, &term)
+			selector, err := metav1.LabelSelectorAsSelector(term.LabelSelector)
+			if err != nil {
+				klog.ErrorS(err, "Unable to convert LabelSelector into Selector")
+				return false
+			}
+			for namespace := range namespaces {
+				for _, existingPod := range pods[namespace] {
+					if existingPod.Name != pod.Name && utils.PodMatchesTermsNamespaceAndSelector(existingPod, namespaces, selector) {
+						node, ok := nodeMap[pod.Spec.NodeName]
+						if !ok {
+							continue
+						}
+						nodeHavingExistingPod, ok := nodeMap[existingPod.Spec.NodeName]
+						if !ok {
+							continue
+						}
+						if hasSameLabelValue(node, nodeHavingExistingPod, term.TopologyKey) {
+							klog.V(1).InfoS("Found Pods violating PodAntiAffinity", "pod to evicted", klog.KObj(pod))
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func hasSameLabelValue(node1, node2 *v1.Node, key string) bool {
+	if node1.Name == node2.Name {
+		return true
+	}
+	node1Labels := node1.Labels
+	if node1Labels == nil {
+		return false
+	}
+	node2Labels := node2.Labels
+	if node2Labels == nil {
+		return false
+	}
+	value1, ok := node1Labels[key]
+	if !ok {
+		return false
+	}
+	value2, ok := node2Labels[key]
+	if !ok {
+		return false
+	}
+	return value1 == value2
+}
+
+// getPodAntiAffinityTerms gets the antiaffinity terms for the given pod.
+func getPodAntiAffinityTerms(podAntiAffinity *v1.PodAntiAffinity) (terms []v1.PodAffinityTerm) {
+	if podAntiAffinity != nil {
+		if len(podAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0 {
+			terms = podAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+		}
+	}
+	return terms
 }

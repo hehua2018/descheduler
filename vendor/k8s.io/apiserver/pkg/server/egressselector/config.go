@@ -18,21 +18,22 @@ package egressselector
 
 import (
 	"fmt"
-	"os"
+	"io/ioutil"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/apis/apiserver"
 	"k8s.io/apiserver/pkg/apis/apiserver/install"
+	"k8s.io/apiserver/pkg/apis/apiserver/v1beta1"
 	"k8s.io/utils/path"
+	"sigs.k8s.io/yaml"
 )
 
 var cfgScheme = runtime.NewScheme()
 
-// validEgressSelectorNames contains the set of valid egress selector names.
+// validEgressSelectorNames contains the set of valid egress selctor names.
 var validEgressSelectorNames = sets.NewString("controlplane", "cluster", "etcd")
 
 func init() {
@@ -50,17 +51,23 @@ func ReadEgressSelectorConfiguration(configFilePath string) (*apiserver.EgressSe
 		return nil, nil
 	}
 	// a file was provided, so we just read it.
-	data, err := os.ReadFile(configFilePath)
+	data, err := ioutil.ReadFile(configFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read egress selector configuration from %q [%v]", configFilePath, err)
 	}
-	config, gvk, err := serializer.NewCodecFactory(cfgScheme, serializer.EnableStrict).UniversalDecoder().Decode(data, nil, nil)
+	var decodedConfig v1beta1.EgressSelectorConfiguration
+	err = yaml.Unmarshal(data, &decodedConfig)
 	if err != nil {
+		// we got an error where the decode wasn't related to a missing type
 		return nil, err
 	}
-	internalConfig, ok := config.(*apiserver.EgressSelectorConfiguration)
-	if !ok {
-		return nil, fmt.Errorf("unexpected config type: %v", gvk)
+	if decodedConfig.Kind != "EgressSelectorConfiguration" {
+		return nil, fmt.Errorf("invalid service configuration object %q", decodedConfig.Kind)
+	}
+	internalConfig := &apiserver.EgressSelectorConfiguration{}
+	if err := cfgScheme.Convert(&decodedConfig, internalConfig, nil); err != nil {
+		// we got an error where the decode wasn't related to a missing type
+		return nil, err
 	}
 	return internalConfig, nil
 }
@@ -165,7 +172,7 @@ func validateDirectConnection(connection apiserver.Connection, fldPath *field.Pa
 		return field.ErrorList{field.Invalid(
 			fldPath.Child("transport"),
 			"direct",
-			"config must be absent for direct connect"),
+			"Transport config should be absent for direct connect"),
 		}
 	}
 
@@ -178,7 +185,7 @@ func validateUDSConnection(udsConfig *apiserver.UDSTransport, fldPath *field.Pat
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("udsName"),
 			"nil",
-			"must be present for UDS connections"))
+			"UDSName should be present for UDS connections"))
 	}
 	return allErrs
 }
@@ -191,7 +198,7 @@ func validateTCPConnection(tcpConfig *apiserver.TCPTransport, fldPath *field.Pat
 			allErrs = append(allErrs, field.Invalid(
 				fldPath.Child("tlsConfig"),
 				"nil",
-				"config must not be present when using HTTP"))
+				"TLSConfig config should not be present when using HTTP"))
 		}
 	} else if strings.HasPrefix(tcpConfig.URL, "https://") {
 		return validateTLSConfig(tcpConfig.TLSConfig, fldPath)

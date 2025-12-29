@@ -37,7 +37,6 @@ func TestSetDefaults_RemovePodsViolatingNodeTaintsArgs(t *testing.T) {
 				LabelSelector:           nil,
 				IncludePreferNoSchedule: false,
 				ExcludedTaints:          nil,
-				IncludedTaints:          nil,
 			},
 		},
 		{
@@ -47,14 +46,12 @@ func TestSetDefaults_RemovePodsViolatingNodeTaintsArgs(t *testing.T) {
 				LabelSelector:           &metav1.LabelSelector{},
 				IncludePreferNoSchedule: false,
 				ExcludedTaints:          []string{"ExcludedTaints"},
-				IncludedTaints:          []string{"IncludedTaints"},
 			},
 			want: &RemovePodsViolatingNodeTaintsArgs{
 				Namespaces:              &api.Namespaces{},
 				LabelSelector:           &metav1.LabelSelector{},
 				IncludePreferNoSchedule: false,
 				ExcludedTaints:          []string{"ExcludedTaints"},
-				IncludedTaints:          []string{"IncludedTaints"},
 			},
 		},
 	}

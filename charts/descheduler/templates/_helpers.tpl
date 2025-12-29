@@ -25,14 +25,6 @@ If release name contains chart name it will be used as a full name.
 {{- end -}}
 
 {{/*
-Expand the namespace of the release.
-Allows overriding it for multi-namespace deployments in combined charts.
-*/}}
-{{- define "descheduler.namespace" -}}
-{{- default .Release.Namespace .Values.namespaceOverride | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-
-{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "descheduler.chart" -}}
@@ -95,10 +87,8 @@ Leader Election
 {{- if .Values.leaderElection.resourceName }}
 - --leader-elect-resource-name={{ .Values.leaderElection.resourceName }}
 {{- end }}
-{{/* resource namespace value starts with a typo so keeping resourceNamescape for backwards compatibility */}}
-{{- $resourceNamespace := default .Values.leaderElection.resourceNamespace .Values.leaderElection.resourceNamescape -}}
-{{- if $resourceNamespace -}}
-- --leader-elect-resource-namespace={{ $resourceNamespace }}
+{{- if .Values.leaderElection.resourceNamescape }}
+- --leader-elect-resource-namespace={{ .Values.leaderElection.resourceNamescape }}
 {{- end -}}
 {{- end }}
 {{- end }}

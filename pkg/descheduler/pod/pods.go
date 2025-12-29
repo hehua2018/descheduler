@@ -25,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 
-	evictionutils "sigs.k8s.io/descheduler/pkg/descheduler/evictions/utils"
 	"sigs.k8s.io/descheduler/pkg/utils"
 )
 
@@ -39,9 +38,6 @@ type FilterFunc func(*v1.Pod) bool
 // GetPodsAssignedToNodeFunc is a function which accept a node name and a pod filter function
 // as input and returns the pods that assigned to the node.
 type GetPodsAssignedToNodeFunc func(string, FilterFunc) ([]*v1.Pod, error)
-
-// PodUtilizationFnc is a function for getting pod's utilization. E.g. requested resources of utilization from metrics.
-type PodUtilizationFnc func(pod *v1.Pod) (v1.ResourceList, error)
 
 // WrapFilterFuncs wraps a set of FilterFunc in one.
 func WrapFilterFuncs(filters ...FilterFunc) FilterFunc {
@@ -103,6 +99,9 @@ func (o *Options) BuildFilterFunc() (FilterFunc, error) {
 		}
 	}
 	return func(pod *v1.Pod) bool {
+		if o.filter != nil && !o.filter(pod) {
+			return false
+		}
 		if len(o.includedNamespaces) > 0 && !o.includedNamespaces.Has(pod.Namespace) {
 			return false
 		}
@@ -110,9 +109,6 @@ func (o *Options) BuildFilterFunc() (FilterFunc, error) {
 			return false
 		}
 		if s != nil && !s.Matches(labels.Set(pod.GetLabels())) {
-			return false
-		}
-		if o.filter != nil && !o.filter(pod) {
 			return false
 		}
 		return true
@@ -146,23 +142,19 @@ func BuildGetPodsAssignedToNodeFunc(podInformer cache.SharedIndexInformer) (GetP
 		if err != nil {
 			return nil, err
 		}
-		return ConvertToPods(objs, filter), nil
+		pods := make([]*v1.Pod, 0, len(objs))
+		for _, obj := range objs {
+			pod, ok := obj.(*v1.Pod)
+			if !ok {
+				continue
+			}
+			if filter(pod) {
+				pods = append(pods, pod)
+			}
+		}
+		return pods, nil
 	}
 	return getPodsAssignedToNode, nil
-}
-
-func ConvertToPods(objs []interface{}, filter FilterFunc) []*v1.Pod {
-	pods := make([]*v1.Pod, 0, len(objs))
-	for _, obj := range objs {
-		pod, ok := obj.(*v1.Pod)
-		if !ok {
-			continue
-		}
-		if filter == nil || filter(pod) {
-			pods = append(pods, pod)
-		}
-	}
-	return pods
 }
 
 // ListPodsOnNodes returns all pods on given nodes.
@@ -223,14 +215,6 @@ func OwnerRef(pod *v1.Pod) []metav1.OwnerReference {
 	return pod.ObjectMeta.GetOwnerReferences()
 }
 
-func OwnerRefUIDs(pod *v1.Pod) []string {
-	var ownerRefUIDs []string
-	for _, ownerRef := range OwnerRef(pod) {
-		ownerRefUIDs = append(ownerRefUIDs, string(ownerRef.UID))
-	}
-	return ownerRefUIDs
-}
-
 func IsBestEffortPod(pod *v1.Pod) bool {
 	return utils.GetPodQOS(pod) == v1.PodQOSBestEffort
 }
@@ -255,32 +239,14 @@ func SortPodsBasedOnPriorityLowToHigh(pods []*v1.Pod) {
 			return false
 		}
 		if (pods[j].Spec.Priority == nil && pods[i].Spec.Priority == nil) || (*pods[i].Spec.Priority == *pods[j].Spec.Priority) {
-			iIsBestEffortPod := IsBestEffortPod(pods[i])
-			jIsBestEffortPod := IsBestEffortPod(pods[j])
-			iIsBurstablePod := IsBurstablePod(pods[i])
-			jIsBurstablePod := IsBurstablePod(pods[j])
-			iIsGuaranteedPod := IsGuaranteedPod(pods[i])
-			jIsGuaranteedPod := IsGuaranteedPod(pods[j])
-			if (iIsBestEffortPod && jIsBestEffortPod) || (iIsBurstablePod && jIsBurstablePod) || (iIsGuaranteedPod && jIsGuaranteedPod) {
-				iHasNoEvictonPolicy := evictionutils.HaveNoEvictionAnnotation(pods[i])
-				jHasNoEvictonPolicy := evictionutils.HaveNoEvictionAnnotation(pods[j])
-				if !iHasNoEvictonPolicy {
-					return true
-				}
-				if !jHasNoEvictonPolicy {
-					return false
-				}
+			if IsBestEffortPod(pods[i]) {
 				return true
 			}
-			if iIsBestEffortPod {
-				return true
-			}
-			if iIsBurstablePod && jIsGuaranteedPod {
+			if IsBurstablePod(pods[i]) && IsGuaranteedPod(pods[j]) {
 				return true
 			}
 			return false
 		}
-
 		return *pods[i].Spec.Priority < *pods[j].Spec.Priority
 	})
 }
@@ -290,13 +256,4 @@ func SortPodsBasedOnAge(pods []*v1.Pod) {
 	sort.Slice(pods, func(i, j int) bool {
 		return pods[i].CreationTimestamp.Before(&pods[j].CreationTimestamp)
 	})
-}
-
-func GroupByNodeName(pods []*v1.Pod) map[string][]*v1.Pod {
-	m := make(map[string][]*v1.Pod)
-	for i := 0; i < len(pods); i++ {
-		pod := pods[i]
-		m[pod.Spec.NodeName] = append(m[pod.Spec.NodeName], pod)
-	}
-	return m
 }
