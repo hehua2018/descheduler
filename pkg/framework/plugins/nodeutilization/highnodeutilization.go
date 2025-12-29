@@ -79,7 +79,7 @@ func (h *HighNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fr
 	resourceNames := getResourceNames(targetThresholds)
 
 	sourceNodes, highNodes := classifyNodes(
-		getNodeUsage(nodes, resourceNames, h.handle.GetPodsAssignedToNodeFunc()),
+		getNodeUsageWithMetrics(ctx, nodes, resourceNames, h.handle),
 		getNodeThresholds(nodes, thresholds, targetThresholds, resourceNames, h.handle.GetPodsAssignedToNodeFunc(), false),
 		func(node *v1.Node, usage NodeUsage, threshold NodeThresholds) bool {
 			return isNodeWithLowUtilization(usage, threshold.lowResourceThreshold)

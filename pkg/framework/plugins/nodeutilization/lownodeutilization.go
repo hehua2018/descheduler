@@ -105,7 +105,7 @@ func (l *LowNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fra
 	resourceNames := getResourceNames(thresholds)
 
 	lowNodes, sourceNodes := classifyNodes(
-		getNodeUsage(nodes, resourceNames, l.handle.GetPodsAssignedToNodeFunc()),
+		getNodeUsageWithMetrics(ctx, nodes, resourceNames, l.handle),
 		getNodeThresholds(nodes, thresholds, targetThresholds, resourceNames, l.handle.GetPodsAssignedToNodeFunc(), useDeviationThresholds),
 		// The node has to be schedulable (to be able to move workload there)
 		func(node *v1.Node, usage NodeUsage, threshold NodeThresholds) bool {
