@@ -79,7 +79,7 @@ func (h *HighNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fr
 	resourceNames := getResourceNames(targetThresholds)
 
 	sourceNodes, highNodes := classifyNodes(
-		getNodeUsageWithMetrics(ctx, nodes, resourceNames, h.handle),
+		getNodeUsageWithMetrics(ctx, nodes, resourceNames, h.handle, h.args.UseMetrics),
 		getNodeThresholds(nodes, thresholds, targetThresholds, resourceNames, h.handle.GetPodsAssignedToNodeFunc(), false),
 		func(node *v1.Node, usage NodeUsage, threshold NodeThresholds) bool {
 			return isNodeWithLowUtilization(usage, threshold.lowResourceThreshold)
@@ -138,6 +138,7 @@ func (h *HighNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fr
 	// Sort the nodes by the usage in ascending order
 	sortNodesByUsage(sourceNodes, true)
 
+	// HighNodeUtilization doesn't have EvictSleepInterval field, so we pass 0
 	evictPodsFromSourceNodes(
 		ctx,
 		h.args.EvictableNamespaces,
@@ -146,7 +147,8 @@ func (h *HighNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fr
 		h.handle.Evictor(),
 		h.podFilter,
 		resourceNames,
-		continueEvictionCond)
+		continueEvictionCond,
+		0) // No sleep for HighNodeUtilization
 
 	return nil
 }

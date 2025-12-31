@@ -1,0 +1,23 @@
+apiVersion: "descheduler/v1alpha2"
+kind: "DeschedulerPolicy"
+profiles:
+  - name: ProfileName
+    pluginConfig:
+    - name: "LowNodeUtilization"
+      args:
+        thresholds:
+          "cpu": 
+          "memory": 20
+          "pods": 20
+        targetThresholds:
+          "cpu": 50
+          "memory": 50
+          "pods": 50
+        useMetrics: true
+        # New field: sleep for 20 seconds after each pod eviction
+        # before rechecking node utilization
+        evictSleepInterval: 20s
+    plugins:
+      balance:
+        enabled:
+          - "LowNodeUtilization"

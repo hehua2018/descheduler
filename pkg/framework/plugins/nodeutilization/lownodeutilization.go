@@ -19,6 +19,7 @@ package nodeutilization
 import (
 	"context"
 	"fmt"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -105,7 +106,7 @@ func (l *LowNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fra
 	resourceNames := getResourceNames(thresholds)
 
 	lowNodes, sourceNodes := classifyNodes(
-		getNodeUsageWithMetrics(ctx, nodes, resourceNames, l.handle),
+		getNodeUsageWithMetrics(ctx, nodes, resourceNames, l.handle, l.args.UseMetrics),
 		getNodeThresholds(nodes, thresholds, targetThresholds, resourceNames, l.handle.GetPodsAssignedToNodeFunc(), useDeviationThresholds),
 		// The node has to be schedulable (to be able to move workload there)
 		func(node *v1.Node, usage NodeUsage, threshold NodeThresholds) bool {
@@ -185,6 +186,11 @@ func (l *LowNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fra
 	// Sort the nodes by the usage in descending order
 	sortNodesByUsage(sourceNodes, false)
 
+	evictSleepInterval := time.Duration(0)
+	if l.args.EvictSleepInterval.Duration > 0 {
+		evictSleepInterval = l.args.EvictSleepInterval.Duration
+	}
+
 	evictPodsFromSourceNodes(
 		ctx,
 		l.args.EvictableNamespaces,
@@ -193,7 +199,8 @@ func (l *LowNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fra
 		l.handle.Evictor(),
 		l.podFilter,
 		resourceNames,
-		continueEvictionCond)
+		continueEvictionCond,
+		evictSleepInterval)
 
 	return nil
 }

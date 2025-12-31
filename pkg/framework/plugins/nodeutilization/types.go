@@ -28,11 +28,19 @@ type LowNodeUtilizationArgs struct {
 	Thresholds             api.ResourceThresholds `json:"thresholds"`
 	TargetThresholds       api.ResourceThresholds `json:"targetThresholds"`
 	NumberOfNodes          int                    `json:"numberOfNodes"`
+	UseMetrics             bool                   `json:"useMetrics,omitempty"`
 
 	// Naming this one differently since namespaces are still
 	// considered while considering resources used by pods
 	// but then filtered out before eviction
 	EvictableNamespaces *api.Namespaces `json:"evictableNamespaces"`
+
+	// EvictSleepInterval specifies the duration to sleep after evicting a pod
+	// before rechecking node utilization. This allows time for the cluster
+	// state to stabilize (pod termination, rescheduling, metrics updates).
+	// If zero or not set, no sleep will occur.
+	// +optional
+	EvictSleepInterval metav1.Duration `json:"evictSleepInterval,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
@@ -43,6 +51,7 @@ type HighNodeUtilizationArgs struct {
 
 	Thresholds    api.ResourceThresholds `json:"thresholds"`
 	NumberOfNodes int                    `json:"numberOfNodes"`
+	UseMetrics    bool                   `json:"useMetrics,omitempty"`
 	// Naming this one differently since namespaces are still
 	// considered while considering resources used by pods
 	// but then filtered out before eviction

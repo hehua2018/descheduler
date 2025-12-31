@@ -20,6 +20,7 @@ import (
 	"context"
 	"math"
 	"sort"
+	"time"
 
 	"sigs.k8s.io/descheduler/pkg/api"
 
@@ -37,9 +38,10 @@ import (
 
 // NodeUsage stores a node's info, pods on it, thresholds and its resource usage
 type NodeUsage struct {
-	node    *v1.Node
-	usage   map[v1.ResourceName]*resource.Quantity
-	allPods []*v1.Pod
+	node       *v1.Node
+	usage      map[v1.ResourceName]*resource.Quantity
+	allPods    []*v1.Pod
+	useMetrics bool // Whether usage is based on actual metrics
 }
 
 type NodeThresholds struct {
@@ -134,9 +136,10 @@ func getNodeUsage(
 		}
 
 		nodeUsageList = append(nodeUsageList, NodeUsage{
-			node:    node,
-			usage:   nodeutil.NodeUtilization(pods, resourceNames),
-			allPods: pods,
+			node:       node,
+			usage:      nodeutil.NodeUtilization(pods, resourceNames),
+			allPods:    pods,
+			useMetrics: false,
 		})
 	}
 
@@ -225,6 +228,7 @@ func evictPodsFromSourceNodes(
 	podFilter func(pod *v1.Pod) bool,
 	resourceNames []v1.ResourceName,
 	continueEviction continueEvictionCond,
+	evictSleepInterval time.Duration,
 ) {
 	// upper bound on total number of pods/cpu/memory and optional extended resources to be moved
 	totalAvailableUsage := map[v1.ResourceName]*resource.Quantity{
@@ -273,7 +277,7 @@ func evictPodsFromSourceNodes(
 		klog.V(1).InfoS("Evicting pods based on priority, if they have same priority, they'll be evicted based on QoS tiers")
 		// sort the evictable Pods based on priority. This also sorts them based on QoS. If there are multiple pods with same priority, they are sorted based on QoS tiers.
 		podutil.SortPodsBasedOnPriorityLowToHigh(removablePods)
-		evictPods(ctx, evictableNamespaces, removablePods, node, totalAvailableUsage, taintsOfDestinationNodes, podEvictor, continueEviction)
+		evictPods(ctx, evictableNamespaces, removablePods, node, totalAvailableUsage, taintsOfDestinationNodes, podEvictor, continueEviction, evictSleepInterval)
 
 	}
 }
@@ -287,6 +291,7 @@ func evictPods(
 	taintsOfLowNodes map[string][]v1.Taint,
 	podEvictor frameworktypes.Evictor,
 	continueEviction continueEvictionCond,
+	evictSleepInterval time.Duration,
 ) {
 	var excludedNamespaces sets.Set[string]
 	if evictableNamespaces != nil {
@@ -313,15 +318,36 @@ func evictPods(
 				if podEvictor.Evict(ctx, pod, evictions.EvictOptions{}) {
 					klog.V(3).InfoS("Evicted pods", "pod", klog.KObj(pod))
 
-					for name := range totalAvailableUsage {
-						if name == v1.ResourcePods {
-							nodeInfo.usage[name].Sub(*resource.NewQuantity(1, resource.DecimalSI))
-							totalAvailableUsage[name].Sub(*resource.NewQuantity(1, resource.DecimalSI))
-						} else {
-							quantity := utils.GetResourceRequestQuantity(pod, name)
-							nodeInfo.usage[name].Sub(quantity)
-							totalAvailableUsage[name].Sub(quantity)
+					// Sleep before rechecking node utilization to allow cluster state to stabilize
+					if evictSleepInterval > 0 {
+						klog.V(2).InfoS("Sleeping before rechecking node utilization",
+							"interval", evictSleepInterval, "node", nodeInfo.node.Name, "pod", klog.KObj(pod))
+						select {
+						case <-ctx.Done():
+							klog.V(2).InfoS("Context cancelled during sleep, stopping eviction", "node", nodeInfo.node.Name)
+							return
+						case <-time.After(evictSleepInterval):
+							// Sleep completed, continue
 						}
+					}
+
+					// When using metrics data, we don't update node usage because:
+					// 1. We can't know the exact pod usage from node-level metrics
+					// 2. The metrics will be refreshed in the next descheduler run
+					// 3. This avoids inconsistency between metrics-based usage and request-based subtraction
+					if !nodeInfo.useMetrics {
+						for name := range totalAvailableUsage {
+							if name == v1.ResourcePods {
+								nodeInfo.usage[name].Sub(*resource.NewQuantity(1, resource.DecimalSI))
+								totalAvailableUsage[name].Sub(*resource.NewQuantity(1, resource.DecimalSI))
+							} else {
+								quantity := utils.GetResourceRequestQuantity(pod, name)
+								nodeInfo.usage[name].Sub(quantity)
+								totalAvailableUsage[name].Sub(quantity)
+							}
+						}
+					} else {
+						klog.V(4).InfoS("Skipping node usage update for metrics-based node", "node", nodeInfo.node.Name)
 					}
 
 					keysAndValues := []interface{}{
