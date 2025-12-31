@@ -200,7 +200,9 @@ func (l *LowNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fra
 		l.podFilter,
 		resourceNames,
 		continueEvictionCond,
-		evictSleepInterval)
+		evictSleepInterval,
+		l.handle,
+		l.args.UseMetrics)
 
 	return nil
 }

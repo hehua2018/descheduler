@@ -148,7 +148,9 @@ func (h *HighNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fr
 		h.podFilter,
 		resourceNames,
 		continueEvictionCond,
-		0) // No sleep for HighNodeUtilization
+		0, // No sleep for HighNodeUtilization
+		h.handle,
+		h.args.UseMetrics)
 
 	return nil
 }

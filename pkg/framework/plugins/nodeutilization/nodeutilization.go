@@ -229,6 +229,8 @@ func evictPodsFromSourceNodes(
 	resourceNames []v1.ResourceName,
 	continueEviction continueEvictionCond,
 	evictSleepInterval time.Duration,
+	handle frameworktypes.Handle,
+	useMetrics bool,
 ) {
 	// upper bound on total number of pods/cpu/memory and optional extended resources to be moved
 	totalAvailableUsage := map[v1.ResourceName]*resource.Quantity{
@@ -277,7 +279,7 @@ func evictPodsFromSourceNodes(
 		klog.V(1).InfoS("Evicting pods based on priority, if they have same priority, they'll be evicted based on QoS tiers")
 		// sort the evictable Pods based on priority. This also sorts them based on QoS. If there are multiple pods with same priority, they are sorted based on QoS tiers.
 		podutil.SortPodsBasedOnPriorityLowToHigh(removablePods)
-		evictPods(ctx, evictableNamespaces, removablePods, node, totalAvailableUsage, taintsOfDestinationNodes, podEvictor, continueEviction, evictSleepInterval)
+		evictPods(ctx, evictableNamespaces, removablePods, node, totalAvailableUsage, taintsOfDestinationNodes, podEvictor, continueEviction, evictSleepInterval, handle, resourceNames, useMetrics)
 
 	}
 }
@@ -292,6 +294,9 @@ func evictPods(
 	podEvictor frameworktypes.Evictor,
 	continueEviction continueEvictionCond,
 	evictSleepInterval time.Duration,
+	handle frameworktypes.Handle,
+	resourceNames []v1.ResourceName,
+	useMetrics bool,
 ) {
 	var excludedNamespaces sets.Set[string]
 	if evictableNamespaces != nil {
@@ -328,6 +333,37 @@ func evictPods(
 							return
 						case <-time.After(evictSleepInterval):
 							// Sleep completed, continue
+						}
+
+						// After sleep, re-query node usage to get actual utilization
+						// This fetches CPU, memory, and pod count resources for the specific node
+						klog.V(2).InfoS("Re-querying node utilization after sleep", "node", nodeInfo.node.Name)
+						updatedNodeUsages := getNodeUsageWithMetrics(ctx, []*v1.Node{nodeInfo.node}, resourceNames, handle, useMetrics)
+						if len(updatedNodeUsages) > 0 {
+							updatedUsage := updatedNodeUsages[0]
+							// Update nodeInfo with fresh usage data including CPU, memory, and pod counts
+							nodeInfo.usage = updatedUsage.usage
+							nodeInfo.useMetrics = updatedUsage.useMetrics
+
+							// Print node load rates (utilization percentages for CPU, memory, pods)
+							usagePercentages := resourceUsagePercentages(nodeInfo.NodeUsage)
+							for resourceName, percentage := range usagePercentages {
+								klog.V(2).InfoS("Node load rate after sleep",
+									"node", nodeInfo.node.Name,
+									"resource", resourceName,
+									"percentage", percentage)
+							}
+
+							// Check if node still exceeds target threshold
+							// For LowNodeUtilization, check if node is still above high threshold
+							// For HighNodeUtilization, check if node is still below low threshold
+							// We'll use the same continueEviction condition to check
+							// But we need to check if the node still needs eviction
+							if !continueEviction(nodeInfo, totalAvailableUsage) {
+								klog.V(2).InfoS("Node no longer exceeds target threshold after sleep, stopping eviction for this node",
+									"node", nodeInfo.node.Name)
+								break
+							}
 						}
 					}
 
