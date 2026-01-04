@@ -4,5 +4,6 @@ vendordiff.patch
 .idea/
 *.code-workspace
 .vscode/
+.kilocode
 kind
 bin/
