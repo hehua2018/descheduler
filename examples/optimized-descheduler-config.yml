@@ -1,0 +1,133 @@
+# Kubernetes Descheduler 优化配置示例
+# 该配置文件展示了如何启用所有优化功能
+
+apiVersion: "descheduler/v1alpha1"
+kind: "DeschedulerPolicy"
+
+# 全局配置
+enableSchedulerProfile: false
+
+# 驱逐策略配置
+strategies:
+  # 低节点利用率策略 - 从高利用率节点驱逐Pod到低利用率节点
+  "LowNodeUtilization":
+    enabled: true
+    params:
+      # 资源阈值配置（百分比）
+      thresholds:
+        cpu: 80
+        memory: 80
+        pods: 80
+        # 扩展资源支持
+        nvidia.com/gpu: 80
+      
+      # 目标阈值配置（驱逐目标）
+      targetThresholds:
+        cpu: 60
+        memory: 60
+        pods: 60
+        nvidia.com/gpu: 60
+      
+      # 节点数量（可选）
+      numberOfNodes: 2
+      
+      # ==================== 优化功能配置 ====================
+      
+      # 1. 指标采集扩展 - 使用实际资源使用而非请求
+      useMetrics: true
+      
+      # 2. 指数退避重试机制 - 集群稳定化
+      evictSleepInterval: 5s
+      
+      # 3. 动态阈值适配 - 自动调整阈值
+      adaptiveThresholds:
+        enabled: true
+        strategy:
+          minThreshold: 15        # 最小阈值保护
+          maxThreshold: 90        # 最大阈值保护
+          adjustmentRate: 0.2     # 调整幅度限制
+          stabilityWindow: 5m     # 稳定性窗口
+          predictionWeight: 0.3   # 预测权重
+      
+      # 4. 资源预测配置 - 基于历史数据预测
+      resourcePrediction:
+        enabled: true
+        method: "MovingAverage"   # 可选: MovingAverage, ExponentialSmoothing, LinearRegression
+        lookbackWindow: "30m"     # 回溯窗口
+        confidenceThreshold: 0.3  # 置信度阈值
+        maxPredictionHorizon: "1h" # 最大预测时长
+      
+      # 可选的命名空间过滤
+      evictableNamespaces:
+        exclude:
+          - "kube-system"
+          - "descheduler"
+
+  # 高节点利用率策略 - 从低利用率节点驱逐Pod到高利用率节点
+  "HighNodeUtilization":
+    enabled: true
+    params:
+      thresholds:
+        cpu: 50
+        memory: 50
+        pods: 50
+        nvidia.com/gpu: 50
+      numberOfNodes: 2
+      
+      # 同样启用优化功能
+      useMetrics: true
+      evictSleepInterval: 3s
+      
+      adaptiveThresholds:
+        enabled: true
+        strategy:
+          minThreshold: 10
+          maxThreshold: 85
+          adjustmentRate: 0.15
+          stabilityWindow: 3m
+          predictionWeight: 0.2
+      
+      resourcePrediction:
+        enabled: true
+        method: "ExponentialSmoothing"
+        lookbackWindow: "20m"
+        confidenceThreshold: 0.4
+
+# 其他可选策略
+# "RemoveDuplicates": enabled: true
+# "RemovePodsHavingTooManyRestarts": enabled: true
+# "LowNodeUtilization": enabled: true
+# "HighNodeUtilization": enabled: true
+
+---
+# 配置说明文档
+# 
+# 优化功能详解:
+#
+# 1. useMetrics: true
+#    - 使用metrics-server获取的实际资源使用数据
+#    - 而非仅基于Pod资源请求的估算
+#    - 需要集群中部署metrics-server
+#
+# 2. evictSleepInterval: 5s
+#    - 每次驱逐后等待5秒让集群稳定
+#    - 采用指数退避算法，最多重试5次
+#    - 避免频繁驱逐导致集群震荡
+#
+# 3. adaptiveThresholds
+#    - 根据集群规模自动调整阈值
+#    - 小集群(3-5节点): 更激进的调整
+#    - 大集群(30+节点): 更保守的调整
+#    - 结合预测数据进行智能调整
+#
+# 4. resourcePrediction
+#    - 基于历史数据预测未来资源需求
+#    - 移动平均: 适合稳定负载
+#    - 指数平滑: 适合有趋势的负载
+#    - 线性回归: 适合周期性负载
+#
+# 使用建议:
+# - 开发环境: 可以启用所有功能，参数可以更激进
+# - 生产环境: 建议先在测试集群验证，逐步调整参数
+# - GPU集群: 特别关注扩展资源阈值配置
+# - 大规模集群: 适当增加稳定性窗口，降低调整频率

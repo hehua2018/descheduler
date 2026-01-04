@@ -324,46 +324,53 @@ func evictPods(
 					klog.V(3).InfoS("Evicted pods", "pod", klog.KObj(pod))
 
 					// Sleep before rechecking node utilization to allow cluster state to stabilize
-					if evictSleepInterval > 0 {
-						klog.V(2).InfoS("Sleeping before rechecking node utilization",
-							"interval", evictSleepInterval, "node", nodeInfo.node.Name, "pod", klog.KObj(pod))
-						select {
-						case <-ctx.Done():
-							klog.V(2).InfoS("Context cancelled during sleep, stopping eviction", "node", nodeInfo.node.Name)
-							return
-						case <-time.After(evictSleepInterval):
-							// Sleep completed, continue
-						}
+					// Apply exponential backoff when waiting for cluster stabilization
+					const maxAttempts = 5
+					const baseDelay = 2 * time.Second
+					backoff := baseDelay
 
-						// After sleep, re-query node usage to get actual utilization
-						// This fetches CPU, memory, and pod count resources for the specific node
-						klog.V(2).InfoS("Re-querying node utilization after sleep", "node", nodeInfo.node.Name)
-						updatedNodeUsages := getNodeUsageWithMetrics(ctx, []*v1.Node{nodeInfo.node}, resourceNames, handle, useMetrics)
-						if len(updatedNodeUsages) > 0 {
-							updatedUsage := updatedNodeUsages[0]
-							// Update nodeInfo with fresh usage data including CPU, memory, and pod counts
-							nodeInfo.usage = updatedUsage.usage
-							nodeInfo.useMetrics = updatedUsage.useMetrics
+					for attempt := 1; attempt <= maxAttempts; attempt++ {
+						if evictSleepInterval > 0 {
+							klog.V(2).InfoS("Cluster stabilization backoff",
+								"attempt", attempt,
+								"backoff", backoff,
+								"node", nodeInfo.node.Name,
+								"pod", klog.KObj(pod))
 
-							// Print node load rates (utilization percentages for CPU, memory, pods)
-							usagePercentages := resourceUsagePercentages(nodeInfo.NodeUsage)
-							for resourceName, percentage := range usagePercentages {
-								klog.V(2).InfoS("Node load rate after sleep",
-									"node", nodeInfo.node.Name,
-									"resource", resourceName,
-									"percentage", percentage)
+							select {
+							case <-ctx.Done():
+								klog.V(2).InfoS("Context cancelled during backoff", "node", nodeInfo.node.Name)
+								return
+							case <-time.After(backoff):
+								// Backoff completed
 							}
 
-							// Check if node still exceeds target threshold
-							// For LowNodeUtilization, check if node is still above high threshold
-							// For HighNodeUtilization, check if node is still below low threshold
-							// We'll use the same continueEviction condition to check
-							// But we need to check if the node still needs eviction
-							if !continueEviction(nodeInfo, totalAvailableUsage) {
-								klog.V(2).InfoS("Node no longer exceeds target threshold after sleep, stopping eviction for this node",
-									"node", nodeInfo.node.Name)
-								break
+							// Re-query node usage after backoff
+							klog.V(2).InfoS("Re-querying node utilization after backoff", "node", nodeInfo.node.Name)
+							updatedNodeUsages := getNodeUsageWithMetrics(ctx, []*v1.Node{nodeInfo.node}, resourceNames, handle, useMetrics)
+							if len(updatedNodeUsages) > 0 {
+								updatedUsage := updatedNodeUsages[0]
+								nodeInfo.usage = updatedUsage.usage
+								nodeInfo.useMetrics = updatedUsage.useMetrics
+
+								// Print updated resource utilization
+								usagePercentages := resourceUsagePercentages(nodeInfo.NodeUsage)
+								for resourceName, percentage := range usagePercentages {
+									klog.V(3).InfoS("Resource utilization after backoff",
+										"node", nodeInfo.node.Name,
+										"resource", resourceName,
+										"percentage", percentage)
+								}
+
+								// Check if cluster has stabilized
+								if !continueEviction(nodeInfo, totalAvailableUsage) {
+									klog.V(2).InfoS("Cluster stabilized during backoff", "node", nodeInfo.node.Name)
+									break
+								}
 							}
+
+							// Double the backoff for next attempt (exponential)
+							backoff = time.Duration(math.Min(float64(baseDelay*(1<<attempt)), float64(30*time.Second)))
 						}
 					}
 
@@ -482,6 +489,23 @@ func classifyPods(pods []*v1.Pod, filter func(pod *v1.Pod) bool) ([]*v1.Pod, []*
 	}
 
 	return nonRemovablePods, removablePods
+}
+
+// Export helper functions for use in strategy plugins
+func IsNodeAboveTargetUtilization(usage NodeUsage, threshold map[v1.ResourceName]*resource.Quantity) bool {
+	return isNodeAboveTargetUtilization(usage, threshold)
+}
+
+func IsNodeWithLowUtilization(usage NodeUsage, threshold map[v1.ResourceName]*resource.Quantity) bool {
+	return isNodeWithLowUtilization(usage, threshold)
+}
+
+func SortNodesByUsage(nodes []NodeInfo, ascending bool) {
+	sortNodesByUsage(nodes, ascending)
+}
+
+func GetResourceNames(thresholds api.ResourceThresholds) []v1.ResourceName {
+	return getResourceNames(thresholds)
 }
 
 func averageNodeBasicresources(nodes []*v1.Node, getPodsAssignedToNode podutil.GetPodsAssignedToNodeFunc, resourceNames []v1.ResourceName) api.ResourceThresholds {

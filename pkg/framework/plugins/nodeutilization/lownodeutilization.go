@@ -103,7 +103,7 @@ func (l *LowNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fra
 			targetThresholds[v1.ResourceMemory] = MaxResourcePercentage
 		}
 	}
-	resourceNames := getResourceNames(thresholds)
+	resourceNames := GetResourceNames(thresholds)
 
 	lowNodes, sourceNodes := classifyNodes(
 		getNodeUsageWithMetrics(ctx, nodes, resourceNames, l.handle, l.args.UseMetrics),
@@ -114,10 +114,10 @@ func (l *LowNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fra
 				klog.V(2).InfoS("Node is unschedulable, thus not considered as underutilized", "node", klog.KObj(node))
 				return false
 			}
-			return isNodeWithLowUtilization(usage, threshold.lowResourceThreshold)
+			return IsNodeWithLowUtilization(usage, threshold.lowResourceThreshold)
 		},
 		func(node *v1.Node, usage NodeUsage, threshold NodeThresholds) bool {
-			return isNodeAboveTargetUtilization(usage, threshold.highResourceThreshold)
+			return IsNodeAboveTargetUtilization(usage, threshold.highResourceThreshold)
 		},
 	)
 
@@ -171,7 +171,7 @@ func (l *LowNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fra
 
 	// stop if node utilization drops below target threshold or any of required capacity (cpu, memory, pods) is moved
 	continueEvictionCond := func(nodeInfo NodeInfo, totalAvailableUsage map[v1.ResourceName]*resource.Quantity) bool {
-		if !isNodeAboveTargetUtilization(nodeInfo.NodeUsage, nodeInfo.thresholds.highResourceThreshold) {
+		if !IsNodeAboveTargetUtilization(nodeInfo.NodeUsage, nodeInfo.thresholds.highResourceThreshold) {
 			return false
 		}
 		for name := range totalAvailableUsage {
@@ -184,7 +184,7 @@ func (l *LowNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fra
 	}
 
 	// Sort the nodes by the usage in descending order
-	sortNodesByUsage(sourceNodes, false)
+	SortNodesByUsage(sourceNodes, false)
 
 	evictSleepInterval := time.Duration(0)
 	if l.args.EvictSleepInterval.Duration > 0 {

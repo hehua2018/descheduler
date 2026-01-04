@@ -76,20 +76,20 @@ func (h *HighNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fr
 	targetThresholds := make(api.ResourceThresholds)
 
 	setDefaultForThresholds(thresholds, targetThresholds)
-	resourceNames := getResourceNames(targetThresholds)
+	resourceNames := GetResourceNames(targetThresholds)
 
 	sourceNodes, highNodes := classifyNodes(
 		getNodeUsageWithMetrics(ctx, nodes, resourceNames, h.handle, h.args.UseMetrics),
 		getNodeThresholds(nodes, thresholds, targetThresholds, resourceNames, h.handle.GetPodsAssignedToNodeFunc(), false),
 		func(node *v1.Node, usage NodeUsage, threshold NodeThresholds) bool {
-			return isNodeWithLowUtilization(usage, threshold.lowResourceThreshold)
+			return IsNodeWithLowUtilization(usage, threshold.lowResourceThreshold)
 		},
 		func(node *v1.Node, usage NodeUsage, threshold NodeThresholds) bool {
 			if nodeutil.IsNodeUnschedulable(node) {
 				klog.V(2).InfoS("Node is unschedulable", "node", klog.KObj(node))
 				return false
 			}
-			return !isNodeWithLowUtilization(usage, threshold.lowResourceThreshold)
+			return !IsNodeWithLowUtilization(usage, threshold.lowResourceThreshold)
 		})
 
 	// log message in one line
@@ -136,7 +136,7 @@ func (h *HighNodeUtilization) Balance(ctx context.Context, nodes []*v1.Node) *fr
 	}
 
 	// Sort the nodes by the usage in ascending order
-	sortNodesByUsage(sourceNodes, true)
+	SortNodesByUsage(sourceNodes, true)
 
 	// HighNodeUtilization doesn't have EvictSleepInterval field, so we pass 0
 	evictPodsFromSourceNodes(

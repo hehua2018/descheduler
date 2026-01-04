@@ -140,14 +140,18 @@ func getNodeUsageWithMetrics(
 		// Use metrics if available and enabled
 		if useMetrics && metricsMap != nil {
 			if nodeMetrics, ok := metricsMap[node.Name]; ok {
-				// Use actual CPU and memory usage from metrics
-				if cpuUsage, ok := nodeMetrics[v1.ResourceCPU]; ok {
-					usage[v1.ResourceCPU] = cpuUsage
+				// Use actual resource usage from metrics for all available types
+				for resourceName, quantity := range nodeMetrics {
+					// Only override if this resource is in our watch list
+					if _, exists := usage[resourceName]; exists {
+						usage[resourceName] = quantity
+						klog.V(4).InfoS("Updated resource usage from metrics",
+							"node", node.Name,
+							"resource", resourceName,
+							"value", quantity.String())
+					}
 				}
-				if memoryUsage, ok := nodeMetrics[v1.ResourceMemory]; ok {
-					usage[v1.ResourceMemory] = memoryUsage
-				}
-				klog.V(3).InfoS("Using actual metrics for node usage", "node", node.Name, "cpu", usage[v1.ResourceCPU].MilliValue(), "memory", usage[v1.ResourceMemory].Value())
+				klog.V(3).InfoS("Using actual metrics for node usage", "node", node.Name, "usage", usage)
 			} else {
 				klog.V(3).InfoS("No metrics available for node, using request-based usage", "node", node.Name)
 			}
